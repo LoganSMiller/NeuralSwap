@@ -59,6 +59,7 @@ const CHECKS: Record<string, string> = {
   diskSpace: 'Disk space',
   sourceFiles: 'Package contents',
   graphicsCard: 'Graphics card',
+  otherTools: 'Other tools',
 };
 
 const FILE_STATUS: Record<string, { label: string; why: string }> = {

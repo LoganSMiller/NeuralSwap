@@ -640,7 +640,7 @@ mod tests {
         match bench.run(&plan) {
             Outcome::Refused(report) => {
                 assert!(!report.ok);
-                assert_eq!(report.checks.len(), 8);
+                assert_eq!(report.checks.len(), 9);
             }
             other => panic!("expected a refusal, got {other:?}"),
         }

@@ -2,6 +2,7 @@ pub mod api;
 pub mod candidates;
 pub mod capability;
 pub mod folder;
+pub mod footprints;
 pub mod integration;
 
 pub use api::{detect, Api, Verdict, MARKERS};
@@ -10,4 +11,5 @@ pub use capability::{all_outlooks, outlook, Feature, Input, Outlook, Quality};
 pub use folder::{
     scan_folder, Candidate, EmptyReason, FolderScan, RuntimeFile, RuntimeKind, RULES,
 };
+pub use footprints::{Displaced, Footprint, Tool};
 pub use integration::{assess, Assessment, Integration, Route};

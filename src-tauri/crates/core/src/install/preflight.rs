@@ -21,6 +21,7 @@ use crate::error::Code;
 use crate::fsx::paths::safe_path;
 use crate::install::plan::{Plan, StepAction};
 use crate::platform::gpu::{self, Generation};
+use crate::scan::footprints;
 
 /// Kept as a fixed set rather than free text so the UI can explain each one
 /// properly, in the user's language, with the right advice attached.
@@ -35,6 +36,7 @@ pub enum CheckName {
     DiskSpace,
     SourceFiles,
     GraphicsCard,
+    OtherTools,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +117,7 @@ pub fn preflight(request: &Request<'_>) -> Preflight {
         check_disk_space(request),
         check_source_files(request),
         check_graphics_card(request),
+        check_other_tools(request),
     ];
 
     let ok = !checks
@@ -431,6 +434,76 @@ fn check_graphics_card(request: &Request<'_>) -> Check {
     )
 }
 
+/// Whether another tool has already modified this folder.
+///
+/// A warning rather than a refusal - it is the user's game and they may well
+/// have installed something on purpose. But the consequence is not obvious and
+/// it damages the one guarantee we make.
+///
+/// If another tool replaced a runtime and kept its own copy of the original,
+/// then the file sitting there now is *theirs*. Our backup would capture that,
+/// and a restore months later would put their swap back and describe it as the
+/// game's own file. Their `.original` is the genuine article - so it is named
+/// here, while it still exists to be named.
+fn check_other_tools(request: &Request<'_>) -> Check {
+    let folder = if request.plan.install_dir.is_empty() {
+        request.game_dir.to_path_buf()
+    } else {
+        request
+            .game_dir
+            .join(request.plan.install_dir.replace('\\', "/"))
+    };
+    let survey = footprints::survey(&folder);
+    if survey.is_empty() {
+        return pass(
+            CheckName::OtherTools,
+            "nothing else has modified this folder",
+        );
+    }
+
+    let names: Vec<&str> = survey
+        .tools_present()
+        .iter()
+        .map(|tool| tool.label())
+        .collect();
+
+    if survey.would_shadow_a_backup() {
+        let shadowed: Vec<String> = survey
+            .displaced
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{} (their copy of the original: {})",
+                    entry.file, entry.backup
+                )
+            })
+            .collect();
+        return Check {
+            name: CheckName::OtherTools,
+            outcome: CheckOutcome::Warn,
+            detail: format!(
+                "{} already replaced files here and kept the originals. If NeuralSwap \
+                 installs over them, the copy it sets aside will be theirs rather than the \
+                 game's - so keep their backup: {}",
+                names.join(", "),
+                shadowed.join("; ")
+            ),
+            code: None,
+        };
+    }
+
+    Check {
+        name: CheckName::OtherTools,
+        outcome: CheckOutcome::Warn,
+        detail: format!(
+            "already present here: {}. Two injectors that take the same filename will not \
+             both load.",
+            names.join(", ")
+        ),
+        code: None,
+    }
+}
+
 /// The steps that change something. A skip has nothing to check.
 fn changing(plan: &Plan) -> impl Iterator<Item = &crate::install::plan::Step> {
     plan.steps
@@ -548,7 +621,7 @@ mod tests {
         assert!(report.ok, "{:?}", report.blockers());
         // Every check is reported, not just the failures - the user sees the
         // whole picture on one screen.
-        assert_eq!(report.checks.len(), 8);
+        assert_eq!(report.checks.len(), 9);
     }
 
     #[test]
@@ -563,7 +636,7 @@ mod tests {
         };
         let report = run(&broken);
         assert!(!report.ok);
-        assert_eq!(report.checks.len(), 8);
+        assert_eq!(report.checks.len(), 9);
         assert_eq!(
             outcome_of(&report, CheckName::GameDirectory),
             CheckOutcome::Fail
