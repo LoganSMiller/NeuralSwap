@@ -1,5 +1,9 @@
 # NeuralSwap
 
+[![CI](https://github.com/LoganSMiller/NeuralSwap/actions/workflows/ci.yml/badge.svg)](https://github.com/LoganSMiller/NeuralSwap/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/LoganSMiller/NeuralSwap?include_prereleases&label=release)](https://github.com/LoganSMiller/NeuralSwap/releases/latest)
+[![License](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
+
 Neural-rendering upscaler management for PC games: find the games already
 installed, show exactly what will change, install, verify, and put it back.
 
