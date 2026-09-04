@@ -10,6 +10,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
 pub mod bytes;
+pub mod components;
 pub mod error;
 pub mod fsx;
 pub mod hash;
