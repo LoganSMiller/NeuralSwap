@@ -13,6 +13,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   rust:
     name: rust (${{ matrix.os }})
@@ -23,11 +26,11 @@ jobs:
         # Windows is what ships, and the only platform where the path rules
         # this code depends on actually apply. Linux runs too: it is where
         # contributors work, and it catches an assumption that only holds on
-        # one of the two - which is exactly the class of bug the path rules
-        # were rewritten to eliminate.
+        # one of the two - exactly the class of bug the path rules were
+        # rewritten to eliminate.
         os: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,6 +45,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      # `tauri::generate_context!` reads the frontend at compile time and fails
+      # if `frontendDist` is missing, so the web assets must exist before any
+      # cargo command touches the app crate - including clippy.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18'
+          cache: npm
+      - run: npm ci
+      - name: Build the frontend
+        run: npm run build:web
 
       - name: Format
         working-directory: src-tauri
@@ -61,7 +75,7 @@ jobs:
     name: frontend and vectors
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -102,12 +116,14 @@ jobs:
     name: dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22.18'
           cache: npm
       - run: npm ci
+
       # There are no production npm dependencies, so this must stay clean. The
       # project this one learns from failed here on its single runtime
       # dependency, whose advisory had no fixed version to upgrade to.
@@ -115,6 +131,11 @@ jobs:
         run: npm audit --omit=dev --audit-level=low
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: rustsec/audit-check@v2
+      - uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+
+      # The lockfile lives with the workspace under src-tauri, not at the
+      # repository root, so it has to be named explicitly.
+      - name: Rust dependencies
+        run: cargo audit --file src-tauri/Cargo.lock
