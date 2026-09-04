@@ -87,6 +87,97 @@ the entire route structure:
 
 ---
 
+### 3.1 Frame generation is the exception: it cannot be fed at all
+
+Frame generation has its own 70 KB guide, and it asks for considerably more
+than the core guide implies:
+
+- `kBufferTypeHUDLessColor` **and** the UI as its own layer
+  (`kBufferTypeUIColorAndAlpha` or `kBufferTypeUIAlpha` — if both are tagged it
+  prefers `UIAlpha`)
+- `kBufferTypeBackbuffer`, tagged so its sub-rectangle is known
+- Optionally `kBufferTypeBidirectionalDistortionField`
+- And decisively:
+
+> **It is required** for sl.reflex to be integrated in the host application.
+> **Please note that any existing regular Reflex SDK integration (not using
+> Streamline) cannot be used by DLSS-G.**
+
+Reflex is not a buffer. It is a protocol the game takes part in, emitting
+`eReflexMarkerPresentStart` and `eReflexMarkerPresentEnd` carrying frame indices
+that must match the ones given to `slSetConstants`. Nothing outside the renderer
+can take part on the game's behalf.
+
+So frame generation is genuinely **out of reach** in a game that lacks it — not
+degraded, not approximate. Every other feature can run on estimates of varying
+quality; this one cannot run at all. An earlier version of our capability model
+said "estimated" here, which was promising something impossible.
+
+## 3.2 Two ways round the input problem that do not involve feeding
+
+**The NVIDIA App does it at the driver level.** Its DLSS Override can *"update
+hundreds of games to use the latest DLSS features including Multi Frame
+Generation, and the newest AI models for DLSS Super Resolution, Frame
+Generation, and Ray Reconstruction"* — **without modifying game files**, on
+RTX 40 and 50 series.
+
+For any game it covers, that is strictly better than what this application does:
+no injection, no files written, no proxy DLL, NVIDIA-signed, and it survives
+game updates. A tool that says "you do not need me for this, do it there" is
+worth more than one that swaps files anyway. It is also the answer to wanting
+lower overhead — there is no overhead at all.
+
+The corollary is a hazard. **A driver-level override can mask a file swap.** If
+the App is overriding the model for a game, replacing the DLL beside the
+executable may produce no visible change, and the user will conclude our install
+failed. Together with OTA (§5) that gives two independent reasons a
+correctly-installed, correctly-verified swap can appear to do nothing.
+
+**RTX Remix rebuilds the renderer instead of intercepting it.** For DirectX 8
+and 9 games it *"takes the game's drawing instructions and renders everything
+using real-time path tracing"*, with a bridge (`NvRemixBridge.exe`) to run
+32-bit games in a 64-bit process.
+
+That is why it escapes the constraint in §3: it is not recovering albedo from a
+finished frame, it is doing the shading itself and therefore producing a genuine
+G-buffer. The docs do not state that explicitly, so treat it as inference — but
+it follows from path-tracing the scene.
+
+The catch is the scope. Fixed-function DirectX 8/9 only, because those pipelines
+expose enough semantic information to reconstruct a scene; a modern shader-based
+renderer does not. It is a fourth route rather than a general answer, and it
+needs per-game asset work rather than a file copy.
+
+## 3.3 The driver already supplies some of this, locally
+
+Worth knowing before building any sourcing feature. On this machine, under
+`C:\Windows\System32\DriverStore\FileRepository\nvhmi.inf_amd64_*\`:
+
+| File | Size | What it is |
+| --- | --- | --- |
+| `nvngx.dll` | 489 kB | the NGX loader that finds and dispatches to feature runtimes |
+| `_nvngx.dll` | 1.4 MB | its companion |
+| `nvngx_dlssg.dll` | **9.3 MB** | the **frame generation runtime**, driver-supplied |
+| `nvngx_update.exe` + `nvidia-ngx-updater` | 1.0 MB + 6.2 MB | the OTA mechanism from §5, on disk |
+
+So the driver ships the frame generation runtime and the NGX loader outright,
+and carries its own updater. Two consequences:
+
+- **The user's own driver install is a legitimate local source.** For source
+  discovery, the DriverStore should be searched alongside their games — no
+  download, no mirror, no redistribution, and the file is by definition a
+  genuine NVIDIA build. It does not carry `nvngx_dlss.dll`, `nvngx_dlssd.dll`
+  or `nvngx_dlssnr.dll`, so it covers one feature of four.
+- **`nvngx_update.exe` is the OTA machinery**, which makes §5's caveat concrete
+  rather than theoretical: there is a program on disk whose job is replacing
+  these files.
+
+Also installed: **FrameView SDK** (`FvSDK_x64.dll` plus headers and a service).
+That is NVIDIA's frame-timing measurement library, and it is the obvious way to
+answer "what did this install actually do to my frame times" with a measurement
+rather than a claim. It has its own licence and needs its service running, so it
+is an opportunity noted rather than a dependency taken.
+
 ## 4. Signing is part of the loading contract
 
 Every module in Streamline's `bin/x64` is **dual-signed** by NVIDIA: a standard

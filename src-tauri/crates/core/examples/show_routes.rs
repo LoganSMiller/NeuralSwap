@@ -51,6 +51,9 @@ fn main() {
         // another tool added is not evidence the renderer tags anything.
         let game_feeds =
             neuralswap_core::scan::capability::Feature::fed_by_game(&scan.runtime_files);
+        // The hardware gate, read once. Passed in rather than looked up inside
+        // the assessment, which stays a pure function of its arguments.
+        let card = neuralswap_core::platform::gpu::best_nvidia().map(|found| found.generation);
 
         let has_native_dlss = scan.runtime_files.iter().any(|file| {
             file.kind == RuntimeKind::Dlss
@@ -85,6 +88,7 @@ fn main() {
                 .first()
                 .unwrap_or(&neuralswap_core::scan::Route::Feeder),
             &game_feeds,
+            card,
         ) {
             println!(
                 "    {:<18} {:?}  {}",

@@ -575,8 +575,16 @@ pub fn default_catalog() -> Catalog {
                 "permits distribution only as part of an application that uses it, and not as a stand-alone product, so NeuralSwap never ships or mirrors it",
             ),
             "https://github.com/NVIDIA/DLSS",
+            // Two places worth searching, both already on the user's machine.
+            // The driver ships `nvngx.dll` and `nvngx_dlssg.dll` under
+            // System32\DriverStore\FileRepository\nvhmi.inf_amd64_*, which is
+            // a genuine NVIDIA build by definition - no download and nothing
+            // redistributed. It does not carry the other three runtimes, so
+            // installed games are the other source.
             Source::LocalOnly {
-                hint: "your installed games, or an NVIDIA package you already have".to_owned(),
+                hint: "your installed games, or the NVIDIA driver's own copy under \
+                       System32\\DriverStore"
+                    .to_owned(),
             },
         ));
     }

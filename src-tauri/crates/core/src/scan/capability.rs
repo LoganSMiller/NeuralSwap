@@ -49,6 +49,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform::gpu::Generation;
 use crate::scan::integration::{Integration, Route};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -101,9 +102,18 @@ impl Feature {
                 all.extend([Input::JitteredColor, Input::JitterOffset]);
                 all
             }
+            // Frame generation's dedicated guide asks for considerably more
+            // than the core guide implies: the UI as its *own* layer as well
+            // as a HUD-less colour buffer, the backbuffer tagged for subrect
+            // data, and - decisively - Reflex integrated through Streamline.
             Feature::FrameGeneration => {
                 let mut all = base.to_vec();
-                all.push(Input::HudLessColor);
+                all.extend([
+                    Input::HudLessColor,
+                    Input::UiLayer,
+                    Input::Backbuffer,
+                    Input::ReflexMarkers,
+                ]);
                 all
             }
             // Ray reconstruction's requirements are documented; neural
@@ -127,6 +137,35 @@ impl Feature {
     /// inference. Stated because the UI should not present the two alike.
     pub const fn requirements_documented(self) -> bool {
         !matches!(self, Feature::NeuralRendering)
+    }
+
+    /// The oldest architecture that can run this feature at all.
+    ///
+    /// A second, independent gate: the input contract is about what the *game*
+    /// provides, this is about what the *card* can execute. Both have to hold,
+    /// and confusing them is how a user ends up told a feature is available
+    /// when their hardware cannot run it.
+    ///
+    /// Sourced from NVIDIA's Omniverse RTX renderer documentation, which lists
+    /// per-architecture support plainly: ray reconstruction on Turing, Ada and
+    /// Blackwell but not on the Ampere compute cards, which have no RT cores;
+    /// frame generation only on Ada and Blackwell, because it needs the optical
+    /// flow accelerator those introduced.
+    pub const fn minimum_generation(self) -> Generation {
+        match self {
+            // Tensor cores, so RTX 20-series onward. The GTX 16-series is
+            // Turing silicon without them.
+            Feature::SuperResolution => Generation::Turing,
+            // Needs RT cores as well as tensor cores.
+            Feature::RayReconstruction => Generation::Turing,
+            // The optical flow accelerator arrived with Ada. This is the gate
+            // the RTX 40 unlock exists to widen - it raises the *multiplier*
+            // on Ada, it does not bring the feature to older cards.
+            Feature::FrameGeneration => Generation::Ada,
+            // Gated to Blackwell. Inferred rather than documented, like the
+            // rest of neural rendering's requirements.
+            Feature::NeuralRendering => Generation::Blackwell,
+        }
     }
 
     /// Which feature a runtime filename implements.
@@ -203,6 +242,17 @@ pub enum Input {
     JitterOffset,
     /// Post-processed colour with no UI composited into it.
     HudLessColor,
+    /// The UI as its own layer, separate from the frame it sits on.
+    UiLayer,
+    /// The presented backbuffer, tagged so its sub-rectangle is known.
+    Backbuffer,
+    /// Reflex latency markers, delivered through Streamline.
+    ///
+    /// Not a buffer at all but a protocol the game takes part in, emitting
+    /// present-start and present-end markers carrying the frame index. Frame
+    /// generation's guide requires it, and says an existing Reflex integration
+    /// that does not go through Streamline cannot be used.
+    ReflexMarkers,
     Albedo,
     SpecularAlbedo,
     NormalsRoughness,
@@ -232,6 +282,9 @@ impl Input {
             Input::JitteredColor => "jittered colour",
             Input::JitterOffset => "jitter offset",
             Input::HudLessColor => "colour without the UI",
+            Input::UiLayer => "the UI as a separate layer",
+            Input::Backbuffer => "the presented backbuffer",
+            Input::ReflexMarkers => "Reflex latency markers",
             Input::Albedo => "albedo",
             Input::SpecularAlbedo => "specular albedo",
             Input::NormalsRoughness => "normals and roughness",
@@ -260,7 +313,16 @@ impl Input {
             // The UI is composited into the frame before anything outside the
             // renderer sees it. Hooking earlier helps in some engines and not
             // in others.
-            Input::HudLessColor => Recovery::Estimated,
+            Input::HudLessColor | Input::UiLayer => Recovery::Estimated,
+            // The backbuffer is the one thing always available: it is what
+            // gets presented.
+            Input::Backbuffer => Recovery::Sound,
+            // Not a buffer but a protocol. The game has to emit present-start
+            // and present-end markers with matching frame indices, through
+            // Streamline specifically. Nothing outside the renderer can take
+            // part on its behalf, so frame generation cannot be fed into a
+            // game that lacks it - not approximated, not at all.
+            Input::ReflexMarkers => Recovery::NeedsRendererChange,
             // The G-buffer. Albedo cannot be recovered from a finished frame
             // because the lighting has already been applied to it; the same
             // goes for the rest. An estimate can be supplied and the feature
@@ -280,6 +342,12 @@ pub enum Quality {
     /// The game provides every input itself. Swapping the runtime is the whole
     /// job and the result is what the developer shipped, only newer.
     Native,
+    /// The inputs are there but the graphics card cannot execute the feature.
+    ///
+    /// Listed before the input-related verdicts because it is decided first:
+    /// there is no point discussing what a game feeds if the hardware cannot
+    /// run the thing being fed.
+    HardwareTooOld,
     /// The game's own DLSS is mirrored onto a private session, so the inputs
     /// are real rather than estimated.
     Mirrored,
@@ -312,9 +380,36 @@ pub fn outlook(
     _integration: Integration,
     route: Route,
     game_feeds: &[Feature],
+    card: Option<Generation>,
 ) -> Outlook {
     let documented = feature.requirements_documented();
     let fed_by_game = game_feeds.iter().any(|have| have.satisfies(feature));
+
+    // The hardware gate is independent of the input contract and is decided
+    // first: what a game feeds is beside the point if the card cannot execute
+    // the feature. Passed in rather than read here, so this stays a pure
+    // function of its arguments - the same reason the planner does not consult
+    // the filesystem. `None` means the card is unknown, which reports on the
+    // inputs instead of refusing: an unidentified adapter is not evidence of
+    // old hardware.
+    if let Some(card) = card {
+        if !card.at_least(feature.minimum_generation()) {
+            return Outlook {
+                feature,
+                quality: Quality::HardwareTooOld,
+                route,
+                estimated: Vec::new(),
+                out_of_reach: Vec::new(),
+                note: format!(
+                    "{} needs {} or newer, and this machine has {}.",
+                    feature.label(),
+                    feature.minimum_generation().label(),
+                    card.label()
+                ),
+                documented,
+            };
+        }
+    }
 
     if route == Route::NativeSwap {
         // The game satisfies this feature's contract already. Nothing is
@@ -458,10 +553,11 @@ pub fn all_outlooks(
     integration: Integration,
     route: Route,
     game_feeds: &[Feature],
+    card: Option<Generation>,
 ) -> Vec<Outlook> {
     let mut found: Vec<Outlook> = Feature::ALL
         .iter()
-        .map(|feature| outlook(*feature, integration, route, game_feeds))
+        .map(|feature| outlook(*feature, integration, route, game_feeds, card))
         .collect();
     found.sort_by_key(|entry| (entry.quality, entry.feature));
     found
@@ -488,6 +584,7 @@ mod tests {
                 Integration::Streamline,
                 Route::NativeSwap,
                 &Feature::ALL,
+                Some(Generation::Blackwell),
             );
             assert_eq!(found.quality, Quality::Native, "{feature:?}");
             assert!(found.estimated.is_empty());
@@ -506,6 +603,7 @@ mod tests {
             Integration::None,
             Route::Feeder,
             &[],
+            Some(Generation::Blackwell),
         );
         assert_eq!(found.quality, Quality::Estimated);
         assert!(found.out_of_reach.contains(&Input::JitteredColor));
@@ -524,6 +622,7 @@ mod tests {
             Integration::None,
             Route::Feeder,
             &[],
+            Some(Generation::Blackwell),
         );
         assert_eq!(found.quality, Quality::Estimated);
         for input in [
@@ -543,6 +642,7 @@ mod tests {
             Integration::None,
             Route::Bridge,
             &[],
+            Some(Generation::Blackwell),
         );
         assert_eq!(found.quality, Quality::Mirrored);
         assert!(found.estimated.is_empty());
@@ -550,15 +650,30 @@ mod tests {
     }
 
     #[test]
-    fn frame_generation_needs_a_frame_with_no_ui_in_it() {
+    fn frame_generation_cannot_be_fed_into_a_game_that_lacks_it() {
+        // A correction to something this module first got wrong. Frame
+        // generation's own guide requires Reflex integrated *through
+        // Streamline*, and says a plain Reflex integration will not do. That
+        // is a protocol the game takes part in - emitting present markers with
+        // matching frame indices - not a buffer anyone can estimate. So this
+        // is out of reach rather than approximate, and saying "estimated"
+        // would have promised something impossible.
         let found = outlook(
             Feature::FrameGeneration,
             Integration::None,
             Route::Feeder,
             &[],
+            Some(Generation::Blackwell),
         );
-        assert!(found.estimated.contains(&Input::HudLessColor));
-        assert_eq!(found.quality, Quality::Estimated);
+        assert_eq!(found.quality, Quality::OutOfReach);
+        assert!(found.out_of_reach.contains(&Input::ReflexMarkers));
+        assert!(found.note.contains("Reflex latency markers"));
+
+        // It also wants the UI as its own layer as well as a HUD-less frame.
+        let inputs = Feature::FrameGeneration.inputs();
+        assert!(inputs.contains(&Input::UiLayer));
+        assert!(inputs.contains(&Input::HudLessColor));
+        assert!(inputs.contains(&Input::Backbuffer));
     }
 
     #[test]
@@ -587,15 +702,50 @@ mod tests {
 
     #[test]
     fn outlooks_are_ordered_with_the_best_prospects_first() {
-        let native = all_outlooks(Integration::Streamline, Route::NativeSwap, &Feature::ALL);
+        let native = all_outlooks(
+            Integration::Streamline,
+            Route::NativeSwap,
+            &Feature::ALL,
+            Some(Generation::Blackwell),
+        );
         assert!(native.iter().all(|entry| entry.quality == Quality::Native));
 
-        let fed = all_outlooks(Integration::None, Route::Feeder, &[]);
+        let fed = all_outlooks(
+            Integration::None,
+            Route::Feeder,
+            &[],
+            Some(Generation::Blackwell),
+        );
         assert_eq!(fed.len(), 4);
-        // Nothing is out of reach on the fed route - everything degrades to an
-        // estimate rather than becoming impossible.
-        assert!(fed.iter().all(|entry| entry.quality == Quality::Estimated));
-        // And each one says something specific about what is estimated.
+
+        // Not everything degrades gracefully, and an earlier version of this
+        // test asserted that it did. Frame generation is genuinely out of
+        // reach: it needs Reflex integrated through Streamline, which is a
+        // protocol the game must take part in rather than a buffer anyone can
+        // estimate. The other three can run on estimates.
+        assert_eq!(
+            fed.iter()
+                .filter(|entry| entry.quality == Quality::Estimated)
+                .map(|entry| entry.feature)
+                .collect::<Vec<_>>(),
+            vec![
+                Feature::SuperResolution,
+                Feature::RayReconstruction,
+                Feature::NeuralRendering
+            ]
+        );
+        assert_eq!(
+            fed.iter()
+                .filter(|entry| entry.quality == Quality::OutOfReach)
+                .map(|entry| entry.feature)
+                .collect::<Vec<_>>(),
+            vec![Feature::FrameGeneration]
+        );
+
+        // Better prospects sort first, and each says something specific.
+        assert!(fed
+            .windows(2)
+            .all(|pair| pair[0].quality <= pair[1].quality));
         assert!(fed.iter().all(|entry| !entry.note.is_empty()));
     }
 
@@ -612,6 +762,7 @@ mod tests {
             Integration::Streamline,
             Route::NativeSwap,
             &feeds,
+            Some(Generation::Blackwell),
         );
         assert_eq!(found.quality, Quality::OutOfReach);
         assert!(found.out_of_reach.contains(&Input::Albedo));
@@ -623,6 +774,7 @@ mod tests {
             Integration::Streamline,
             Route::NativeSwap,
             &feeds,
+            Some(Generation::Blackwell),
         );
         assert_eq!(same.quality, Quality::Native);
     }
@@ -643,6 +795,7 @@ mod tests {
             Integration::Streamline,
             Route::NativeSwap,
             &[Feature::RayReconstruction],
+            Some(Generation::Blackwell),
         );
         assert_eq!(found.quality, Quality::Native);
     }
@@ -686,6 +839,7 @@ mod tests {
             Integration::Streamline,
             Route::NativeSwap,
             &feeds,
+            Some(Generation::Blackwell),
         );
         assert_eq!(found.quality, Quality::OutOfReach);
     }
@@ -712,6 +866,86 @@ mod tests {
         );
         assert_eq!(Feature::from_runtime("sl.dlss.dll"), None);
         assert_eq!(Feature::from_runtime("d3d12.dll"), None);
+    }
+
+    #[test]
+    fn hardware_is_a_separate_gate_from_what_the_game_feeds() {
+        // Two independent conditions, and conflating them is how somebody gets
+        // told a feature is available when their card cannot execute it. A
+        // Turing card feeds nothing differently - it simply cannot run frame
+        // generation, which needs the optical flow accelerator Ada introduced.
+        let turing = outlook(
+            Feature::FrameGeneration,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &Feature::ALL,
+            Some(Generation::Turing),
+        );
+        assert_eq!(turing.quality, Quality::HardwareTooOld);
+        assert!(turing.note.contains("RTX 40-series"));
+
+        // The same game and the same route on an Ada card is fine.
+        let ada = outlook(
+            Feature::FrameGeneration,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &Feature::ALL,
+            Some(Generation::Ada),
+        );
+        assert_eq!(ada.quality, Quality::Native);
+
+        // Neural rendering is gated higher still.
+        let nr_on_ada = outlook(
+            Feature::NeuralRendering,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &Feature::ALL,
+            Some(Generation::Ada),
+        );
+        assert_eq!(nr_on_ada.quality, Quality::HardwareTooOld);
+    }
+
+    #[test]
+    fn an_unknown_card_reports_on_inputs_rather_than_refusing() {
+        // Consistent with every other check in this codebase: not being able
+        // to identify hardware is not evidence that it is too old.
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &Feature::ALL,
+            None,
+        );
+        assert_eq!(found.quality, Quality::Native);
+
+        // And an unrecognised NVIDIA card answers `at_least` true, so it takes
+        // the same path.
+        let unknown = outlook(
+            Feature::NeuralRendering,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &Feature::ALL,
+            Some(Generation::Unknown),
+        );
+        assert_eq!(unknown.quality, Quality::Native);
+    }
+
+    #[test]
+    fn the_frame_generation_gate_is_what_the_rtx_40_unlock_addresses() {
+        // Worth pinning because it is easy to misread. Frame generation needs
+        // Ada; the unlock raises the *multiplier* on Ada cards. It does not
+        // bring the feature to Turing or Ampere, and nothing does.
+        assert_eq!(
+            Feature::FrameGeneration.minimum_generation(),
+            Generation::Ada
+        );
+        assert!(!Generation::Ampere.at_least(Generation::Ada));
+        assert!(Generation::Ada.at_least(Generation::Ada));
+
+        // Super resolution and ray reconstruction go back to Turing.
+        for feature in [Feature::SuperResolution, Feature::RayReconstruction] {
+            assert_eq!(feature.minimum_generation(), Generation::Turing);
+        }
     }
 
     #[test]

@@ -44,6 +44,9 @@ pub enum Tool {
     DgVoodoo,
     /// Upstream DLSS5-Swapper, which keeps its own backup directory.
     Dlss5Swapper,
+    /// RTX Remix, which replaces the renderer of a DirectX 8 or 9 game
+    /// outright rather than injecting into it.
+    RtxRemix,
     /// A `.original` or `.bak` sibling, which several tools leave behind. The
     /// convention is shared, so the tool cannot be named from it alone.
     UnknownSwapper,
@@ -61,6 +64,7 @@ impl Tool {
             Tool::UltimateAsiLoader => "Ultimate ASI Loader",
             Tool::DgVoodoo => "dgVoodoo 2",
             Tool::Dlss5Swapper => "DLSS5-Swapper",
+            Tool::RtxRemix => "RTX Remix",
             Tool::UnknownSwapper => "another swapping tool",
         }
     }
@@ -70,7 +74,11 @@ impl Tool {
     pub const fn claims_a_proxy_name(self) -> bool {
         matches!(
             self,
-            Tool::ReShade | Tool::OptiScaler | Tool::UltimateAsiLoader | Tool::DgVoodoo
+            Tool::ReShade
+                | Tool::OptiScaler
+                | Tool::UltimateAsiLoader
+                | Tool::DgVoodoo
+                | Tool::RtxRemix
         )
     }
 }
@@ -126,7 +134,7 @@ impl Survey {
 const BACKUP_SUFFIXES: [&str; 3] = [".original", ".bak", ".dlsss"];
 
 /// Exact filenames that identify a tool, lower-cased.
-const BY_NAME: [(&str, Tool); 16] = [
+const BY_NAME: [(&str, Tool); 19] = [
     ("reshade64.dll", Tool::ReShade),
     ("reshade32.dll", Tool::ReShade),
     ("reshade.ini", Tool::ReShade),
@@ -145,14 +153,19 @@ const BY_NAME: [(&str, Tool); 16] = [
     ("rtx40mfgcore.dll", Tool::Rtx40MfgUnlock),
     ("rtx40mfg-ui.addon64", Tool::Rtx40MfgUnlock),
     ("dgvoodoo.conf", Tool::DgVoodoo),
+    // RTX Remix: its bridge, and the config its runtime reads.
+    ("nvremixbridge.exe", Tool::RtxRemix),
+    ("bridge.conf", Tool::RtxRemix),
+    ("rtx.conf", Tool::RtxRemix),
 ];
 
 /// Directory names that identify a tool.
-const BY_DIRECTORY: [(&str, Tool); 4] = [
+const BY_DIRECTORY: [(&str, Tool); 5] = [
     ("_dlss5_backup", Tool::Dlss5Swapper),
     ("reshade-shaders", Tool::ReShade),
     ("optiscaler", Tool::OptiScaler),
     ("d3d12_optiscaler", Tool::OptiScaler),
+    (".trex", Tool::RtxRemix),
 ];
 
 fn identify(lower: &str) -> Option<Tool> {
