@@ -419,7 +419,7 @@ pub async fn install_plan(
     // goes to a blocking thread rather than stalling the UI thread.
     blocking(move || {
         let plan = installer.plan(&game, &rel, &package)?;
-        let preflight = installer.preflight(&game, &plan, &package);
+        let preflight = installer.preflight(&game, &plan, &package, None);
         Ok(PlanReply {
             busy: installer.is_busy(&game),
             plan,

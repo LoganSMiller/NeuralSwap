@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Code;
 use crate::fsx::paths::safe_path;
 use crate::install::plan::{Plan, StepAction};
+use crate::platform::gpu::{self, Generation};
 
 /// Kept as a fixed set rather than free text so the UI can explain each one
 /// properly, in the user's language, with the right advice attached.
@@ -33,6 +34,7 @@ pub enum CheckName {
     FilesInUse,
     DiskSpace,
     SourceFiles,
+    GraphicsCard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +96,11 @@ pub struct Request<'a> {
     pub source_dir: &'a Path,
     /// Where backups will be written. Often a different volume from the game.
     pub backup_dir: &'a Path,
+    /// The hardware generation this package's runtime needs, if it needs one.
+    ///
+    /// `None` means the package has made no claim, and the check reports that
+    /// rather than inventing a requirement.
+    pub requires: Option<Generation>,
 }
 
 pub fn preflight(request: &Request<'_>) -> Preflight {
@@ -107,6 +114,7 @@ pub fn preflight(request: &Request<'_>) -> Preflight {
         check_files_in_use(request),
         check_disk_space(request),
         check_source_files(request),
+        check_graphics_card(request),
     ];
 
     let ok = !checks
@@ -361,6 +369,68 @@ fn check_source_files(request: &Request<'_>) -> Check {
     }
 }
 
+/// Whether this machine's hardware can run what is about to be installed.
+///
+/// A DLSS feature gated to a GPU generation is gated because it needs hardware
+/// the earlier cards do not have. Installing it anyway produces a game that
+/// crashes on launch or silently falls back, and the user blames whatever
+/// touched the folder last - which would be us.
+///
+/// So this check exists to **stop** an install onto hardware that cannot run
+/// it. It is deliberately not a mechanism for selecting a different build per
+/// card: routing older hardware onto a runtime that has had its own hardware
+/// check removed is exactly the failure this is here to prevent, and it would
+/// arrive wearing our journal, manifest and restore path as if we had
+/// sanctioned it.
+///
+/// Uncertainty never blocks. An unreadable adapter, an unrecognised name, or a
+/// package that states no requirement all report rather than refuse: being
+/// unable to identify a card is not evidence that it is the wrong one.
+fn check_graphics_card(request: &Request<'_>) -> Check {
+    let Some(required) = request.requires else {
+        return unknown(
+            CheckName::GraphicsCard,
+            "this package does not say what hardware it needs",
+        );
+    };
+
+    let Some(adapter) = gpu::best_nvidia() else {
+        // No NVIDIA card at all. Worth saying loudly, but the machine may have
+        // one the registry could not describe, and a laptop's discrete GPU can
+        // be switched off entirely.
+        return Check {
+            name: CheckName::GraphicsCard,
+            outcome: CheckOutcome::Warn,
+            detail: format!(
+                "no NVIDIA graphics card was found, and this package needs {}",
+                required.label()
+            ),
+            code: None,
+        };
+    };
+
+    if adapter.generation.at_least(required) {
+        return pass(
+            CheckName::GraphicsCard,
+            match adapter.nvidia_driver.as_deref() {
+                Some(driver) => format!("{} (driver {driver})", adapter.name),
+                None => adapter.name.clone(),
+            },
+        );
+    }
+
+    fail_check(
+        CheckName::GraphicsCard,
+        Code::HardwareUnsupported,
+        format!(
+            "{} is {}, and this runtime needs {}",
+            adapter.name,
+            adapter.generation.label(),
+            required.label()
+        ),
+    )
+}
+
 /// The steps that change something. A skip has nothing to check.
 fn changing(plan: &Plan) -> impl Iterator<Item = &crate::install::plan::Step> {
     plan.steps
@@ -458,6 +528,7 @@ mod tests {
             plan: &fixture.plan,
             source_dir: &fixture.source,
             backup_dir: &fixture.backups,
+            requires: None,
         })
     }
 
@@ -477,7 +548,7 @@ mod tests {
         assert!(report.ok, "{:?}", report.blockers());
         // Every check is reported, not just the failures - the user sees the
         // whole picture on one screen.
-        assert_eq!(report.checks.len(), 7);
+        assert_eq!(report.checks.len(), 8);
     }
 
     #[test]
@@ -492,7 +563,7 @@ mod tests {
         };
         let report = run(&broken);
         assert!(!report.ok);
-        assert_eq!(report.checks.len(), 7);
+        assert_eq!(report.checks.len(), 8);
         assert_eq!(
             outcome_of(&report, CheckName::GameDirectory),
             CheckOutcome::Fail
@@ -590,6 +661,88 @@ mod tests {
             outcome_of(&report, CheckName::DiskSpace),
             CheckOutcome::Fail
         );
+    }
+
+    /// Run the checks with a stated hardware requirement.
+    fn run_needing(fixture: &Fixture, requires: Generation) -> Preflight {
+        preflight(&Request {
+            game_dir: &fixture.game,
+            plan: &fixture.plan,
+            source_dir: &fixture.source,
+            backup_dir: &fixture.backups,
+            requires: Some(requires),
+        })
+    }
+
+    #[test]
+    fn a_package_that_states_no_hardware_requirement_is_not_blocked() {
+        let fixture = fixture(b"runtime bytes");
+        let report = run(&fixture);
+        assert_eq!(
+            outcome_of(&report, CheckName::GraphicsCard),
+            CheckOutcome::Unknown
+        );
+        assert!(report.ok);
+    }
+
+    #[test]
+    fn hardware_older_than_the_runtime_needs_blocks_the_install() {
+        // The whole reason this check exists. A feature gated to a generation
+        // is gated because it needs silicon the earlier cards do not have, and
+        // installing anyway produces a game that crashes on launch.
+        let fixture = fixture(b"runtime bytes");
+        let Some(card) = gpu::best_nvidia() else {
+            return; // No NVIDIA card here; the no-card path is covered below.
+        };
+
+        // Require something strictly newer than whatever this machine has.
+        let beyond = match card.generation {
+            Generation::Blackwell | Generation::NewerThanKnown => None,
+            _ => Some(Generation::NewerThanKnown),
+        };
+        let Some(beyond) = beyond else {
+            // This machine is current, so assert the passing direction and the
+            // refusing direction with a card we know is older.
+            let report = run_needing(&fixture, Generation::Turing);
+            assert_eq!(
+                outcome_of(&report, CheckName::GraphicsCard),
+                CheckOutcome::Pass
+            );
+            assert!(!Generation::Turing.at_least(Generation::Blackwell));
+            return;
+        };
+
+        let report = run_needing(&fixture, beyond);
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == CheckName::GraphicsCard)
+            .expect("a graphics check");
+        assert_eq!(check.outcome, CheckOutcome::Fail);
+        assert_eq!(check.code.as_deref(), Some("hardwareUnsupported"));
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn hardware_new_enough_passes_and_names_the_card() {
+        let fixture = fixture(b"runtime bytes");
+        let report = run_needing(&fixture, Generation::PreTuring);
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == CheckName::GraphicsCard)
+            .expect("a graphics check");
+        match gpu::best_nvidia() {
+            // Every NVIDIA generation is at least PreTuring, so this passes
+            // and the detail should say which card it decided against.
+            Some(card) => {
+                assert_eq!(check.outcome, CheckOutcome::Pass);
+                assert!(check.detail.contains(&card.name));
+            }
+            // No NVIDIA card is a warning, never a block: a laptop's discrete
+            // GPU can be switched off, and the registry may not describe it.
+            None => assert_eq!(check.outcome, CheckOutcome::Warn),
+        }
     }
 
     #[test]

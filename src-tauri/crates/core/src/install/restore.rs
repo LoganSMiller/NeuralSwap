@@ -348,6 +348,7 @@ mod tests {
                 journal_root: &self.journals,
                 backup_root: &self.backups,
                 manifest_root: &self.manifests,
+                requires: None,
                 cancel: &self.cancel,
             })
             .expect("apply")

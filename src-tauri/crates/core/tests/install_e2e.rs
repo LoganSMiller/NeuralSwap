@@ -138,6 +138,7 @@ fn a_real_runtime_swap_installs_verifies_and_restores() {
         journal_root: &bench.journals,
         backup_root: &bench.backups,
         manifest_root: &bench.manifests,
+        requires: None,
         cancel: &cancel,
     })
     .expect("apply");
@@ -246,6 +247,7 @@ fn a_patch_over_our_install_is_detected_and_not_reverted() {
         journal_root: &bench.journals,
         backup_root: &bench.backups,
         manifest_root: &bench.manifests,
+        requires: None,
         cancel: &cancel,
     })
     .expect("apply");

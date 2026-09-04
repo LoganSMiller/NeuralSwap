@@ -22,6 +22,7 @@ pub enum Code {
     ZipEntryUnsafe,
     ZipChecksum,
     PeUnreadable,
+    HardwareUnsupported,
     BadRequest,
     // Install-time failures. These are the codes that can reach a user while
     // something is being written into a game folder, so each one has to say
@@ -54,6 +55,7 @@ impl Code {
             Code::ZipEntryUnsafe => "zipEntryUnsafe",
             Code::ZipChecksum => "zipChecksum",
             Code::PeUnreadable => "peUnreadable",
+            Code::HardwareUnsupported => "hardwareUnsupported",
             Code::BadRequest => "badRequest",
             Code::PackageInvalid => "packageInvalid",
             Code::JournalCorrupt => "journalCorrupt",

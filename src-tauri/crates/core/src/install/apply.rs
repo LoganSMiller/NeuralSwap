@@ -49,6 +49,9 @@ pub struct Request<'a> {
     pub backup_root: &'a Path,
     /// Where per-game install records are kept.
     pub manifest_root: &'a Path,
+    /// The hardware generation this package's runtime needs, if it states one.
+    /// Passed straight to the preflight, which decides what to do about it.
+    pub requires: Option<crate::platform::gpu::Generation>,
     pub cancel: &'a Cancel,
 }
 
@@ -124,6 +127,7 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
         plan: request.plan,
         source_dir: request.source_dir,
         backup_dir: request.backup_root,
+        requires: request.requires,
     });
     if !report.ok {
         return Ok(Outcome::Refused(report));
@@ -494,6 +498,7 @@ mod tests {
                 journal_root: &self.journals,
                 backup_root: &self.backups,
                 manifest_root: &self.manifests,
+                requires: None,
                 cancel: &self.cancel,
             })
             .expect("apply")
@@ -635,7 +640,7 @@ mod tests {
         match bench.run(&plan) {
             Outcome::Refused(report) => {
                 assert!(!report.ok);
-                assert_eq!(report.checks.len(), 7);
+                assert_eq!(report.checks.len(), 8);
             }
             other => panic!("expected a refusal, got {other:?}"),
         }

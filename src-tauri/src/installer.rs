@@ -6,6 +6,7 @@ use neuralswap_core::install::{
     apply, journal, manifest, package, plan, preflight, restore, Integrity, Plan,
 };
 use neuralswap_core::jobs::{Cancel, KeyedLock};
+use neuralswap_core::platform::gpu::Generation;
 
 /// Owns the three on-disk stores an install needs, and the locks around them.
 ///
@@ -84,17 +85,23 @@ impl Installer {
     }
 
     /// Run the checks without installing anything.
+    ///
+    /// `requires` is the hardware generation the package states it needs.
+    /// `None` until packages carry that claim, at which point the check stops
+    /// reporting "no requirement stated" and starts enforcing one.
     pub fn preflight(
         &self,
         game_dir: &Path,
         plan: &Plan,
         package_dir: &Path,
+        requires: Option<Generation>,
     ) -> preflight::Preflight {
         preflight::preflight(&preflight::Request {
             game_dir,
             plan,
             source_dir: package_dir,
             backup_dir: &self.backup_root,
+            requires,
         })
     }
 
@@ -127,6 +134,7 @@ impl Installer {
             journal_root: &self.journal_root,
             backup_root: &self.backup_root,
             manifest_root: &self.manifest_root,
+            requires: None,
             cancel: &cancel,
         })
     }
