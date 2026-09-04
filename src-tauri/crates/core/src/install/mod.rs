@@ -28,6 +28,7 @@
 //! the rules that govern somebody else's game folder.
 
 pub mod apply;
+pub mod discover;
 pub mod journal;
 pub mod manifest;
 pub mod package;
@@ -38,6 +39,7 @@ pub mod restore;
 pub mod version;
 
 pub use apply::{apply, Applied, Outcome, Reached};
+pub use discover::{best_for, from_driver_store, from_game, rank, Candidate, Origin};
 pub use journal::{Journal, JournalRecord, JournalStep, RecoveryOutcome};
 pub use manifest::{FileStatus, InstallManifest, Integrity};
 pub use package::{read_package, read_present};
