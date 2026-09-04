@@ -358,3 +358,80 @@ relitigated from memory:
 [reshade]: https://reshade.me
 [feeder]: https://github.com/jlrouzies-fr/DLSS5-Feeder
 [opti]: https://github.com/optiscaler/OptiScaler
+
+---
+
+## 10. What the community stack actually requires
+
+Read from the seven tools' own sources rather than inferred. This is the part
+that decides whether an install works, and almost all of it fails *silently*
+when it is wrong.
+
+### The add-ons are three different things with similar names
+
+| Add-on | What it is | Where from |
+| --- | --- | --- |
+| ShortFuse's **`renodx-dlss`** | Does the whole job alone on 64-bit DX9/11/12. **Replaces** Feeder rather than working with it. | RenoDX Discord |
+| Krish's **`renodx-dlss5.addon64`** | A neural *consumer*: answers the request Feeder builds. | RenoDX Discord, `#DLSS5` |
+| **Deep Fried Chicken** | The recommended consumer. Three files plus a config. | its author's Discord |
+
+Feeder builds the DLSS request a game never makes; a consumer performs the
+neural rendering. Neither consumer is published anywhere fetchable, and neither
+bundles `nvngx_dlssnr.dll` — the user supplies that, which is what our source
+discovery automates. Feeder's own instructions say to take `nvngx_dlss.dll`
+"from any DLSS game", which is precisely the search we do with provenance
+attached.
+
+### Seven ways an install silently does nothing
+
+1. **Two neural consumers installed.** The first "does nothing at all for the
+   whole session — silently". Feeder's README names this as the first thing to
+   check.
+2. **Feeder and the DX11 bridge both installed** for one game. They are
+   alternatives: the bridge is for games that *have* DLSS.
+3. **OptiScaler left enabled** on the Feeder route.
+4. **The motion-vector shader compiled for one provider while another is
+   enabled** — called "the classic silent failure" outright.
+5. **DRME as the provider.** It does not compile on ReShade 6.8
+   (`X3020: cannot sample from texture that is also used as render target`),
+   still appears enabled, and writes nothing — so DLSS runs with no motion
+   vectors at all.
+6. **The provider's technique below `DLSS 5 Feed`** in the load order.
+7. **ReShade 6.8's own installer writes a malformed search path** —
+   `Shaders\**\**`, a double glob its resolver cannot canonicalize (Win32
+   rejects wildcards, error 123), so it skips the path and no effects are ever
+   found. FeedKit collapses it to `Shaders\**`. Note also that ReShade's INI
+   parser is case-sensitive, so a wrong-case key is silently dead.
+
+Every one of these is checkable before writing anything, which is the
+opportunity: the existing tools detect some of them at runtime and log them.
+
+### Other conflicts worth knowing
+
+NVIDIA **Smooth Motion** must be off for Vulkan, settable per-application
+through driver profile IDs `0xB0CC0875` (enabled-APIs bitfield: 1 DX12, 2 DX11,
+4 Vulkan), `0xB0D384C0` (enable) and `0xB01B8B02` (debug bars, which draw
+coloured bars on generated frames — a genuinely useful diagnostic). The game's
+own MSAA/SSAA must be off.
+
+### The 32-bit path, and why it exists
+
+NVIDIA ships **no 32-bit NGX runtime at all**, so an in-process approach is
+impossible by construction. Feeder runs the 64-bit stack in a separate
+`host64\` helper process with its own ReShade install and its own `ReShade.ini`.
+That is why `dlss5-feed-host64.exe` exists, and why a 32-bit install configures
+ReShade twice.
+
+### Corroborated pins
+
+Two independent projects — upstream DLSS5-Swapper and the guide launcher — pin
+`ReShade.fxh` at the same digest, `6dabfbba…`, from crosire's shader repository.
+An independently corroborated hash is a better pin than one taken on trust from
+a single source.
+
+### "SF" decoded
+
+RHI's `dlssnr-310.8.SF` and `-SF-v2` are the patched neural rendering runtimes;
+the AIO installer's file index names the same thing "RenoDX SF patched",
+covering RTX 20/30/40/50. Worth recording only so the naming is not a mystery
+when it turns up in a folder — NeuralSwap neither ships nor routes them.

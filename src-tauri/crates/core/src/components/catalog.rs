@@ -110,6 +110,18 @@ pub enum Source {
     /// distribution. The alternative - mirroring it - is what the rest of this
     /// ecosystem does, and it is redistribution however it is dressed up.
     LocalOnly { hint: String },
+    /// Published somewhere we cannot fetch from, so the user brings it.
+    ///
+    /// Several of the add-ons this ecosystem depends on are distributed
+    /// through Discord rather than a release page - there is no URL to pin, no
+    /// digest to publish and nothing to automate. Saying so, and naming the
+    /// files expected, is more use than pretending a download exists.
+    UserObtained {
+        /// Where to get it, in words - a channel name, an invite link.
+        from: String,
+        /// The files that should end up in the folder the user chooses.
+        files: Vec<String>,
+    },
     /// Shipped inside our own installer. Only legitimate for a licence that
     /// permits it.
     Bundled { rel: String },
@@ -157,7 +169,7 @@ pub enum Trust {
 impl Source {
     pub fn trust(&self) -> Trust {
         match self {
-            Source::LocalOnly { .. } => Trust::UserSupplied,
+            Source::LocalOnly { .. } | Source::UserObtained { .. } => Trust::UserSupplied,
             Source::Bundled { .. } => Trust::Bundled,
             Source::Pinned { .. } => Trust::Pinned,
             Source::GitHubLatest { .. } | Source::GitHubBranch { .. } | Source::Official { .. } => {
@@ -191,6 +203,16 @@ pub struct Component {
     /// Components that must be installed for this one to do anything.
     #[serde(default)]
     pub requires: Vec<String>,
+    /// Components that must **not** be installed alongside this one.
+    ///
+    /// The reason this is data rather than a note in a README: the failures
+    /// are silent. Two neural consumers beside each other and the first does
+    /// nothing for the entire session, with no error anywhere. Feeder and the
+    /// DX11 bridge both installed for one game is explicitly warned against by
+    /// both authors. OptiScaler left enabled breaks the Feeder route. None of
+    /// these announce themselves, so the preflight has to.
+    #[serde(default)]
+    pub conflicts_with: Vec<String>,
     /// Marked when a component is experimental or known to be rough. The UI
     /// says so rather than letting somebody find out.
     #[serde(default)]
@@ -293,6 +315,30 @@ impl Catalog {
                     return fail(Code::BadRequest, format!("{key} requires itself"));
                 }
             }
+
+            for rival in &component.conflicts_with {
+                let Some(other) = self.components.get(rival) else {
+                    return fail(
+                        Code::BadRequest,
+                        format!("{key} conflicts with {rival}, which is not in the catalogue"),
+                    );
+                };
+                // Conflict is a property of a pair, so it has to be declared
+                // by both. Otherwise the warning a user sees would depend on
+                // which of the two they happened to install second.
+                if !other.conflicts_with.contains(&component.id) {
+                    return fail(
+                        Code::BadRequest,
+                        format!("{key} conflicts with {rival} but {rival} does not say so"),
+                    );
+                }
+                if component.requires.contains(rival) {
+                    return fail(
+                        Code::BadRequest,
+                        format!("{key} both requires and conflicts with {rival}"),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -303,7 +349,9 @@ impl Source {
     /// rendered with a placeholder version so the scheme can still be seen.
     fn urls(&self) -> Vec<String> {
         match self {
-            Source::LocalOnly { .. } | Source::Bundled { .. } => Vec::new(),
+            Source::LocalOnly { .. } | Source::UserObtained { .. } | Source::Bundled { .. } => {
+                Vec::new()
+            }
             Source::Pinned { url, .. } => vec![url.clone()],
             Source::GitHubLatest { repo, .. } => {
                 vec![format!(
@@ -344,6 +392,7 @@ fn component(
         homepage: homepage.to_owned(),
         source,
         requires: Vec::new(),
+        conflicts_with: Vec::new(),
         experimental: false,
     }
 }
@@ -410,10 +459,15 @@ pub fn default_catalog() -> Catalog {
         },
     ));
 
+    // Three different add-ons that are easy to confuse, and confusing them is
+    // how an install silently does nothing. Feeder's own README spends a
+    // section disambiguating them, and an earlier version of this catalogue
+    // got it wrong: it listed one "RenoDX" fetched from GitHub releases, which
+    // is neither of the two that matter here and is not published there.
     components.push(component(
         "renodx",
         "RenoDX",
-        "Tone mapping and HDR for games that shipped without it, and the host add-on the DLSS 5 routes attach to.",
+        "Tone mapping and HDR for games that shipped without it. The general-purpose add-on, and not one of the neural-rendering pieces.",
         Role::Addon,
         Licence::Mit,
         "https://github.com/clshortfuse/renodx",
@@ -422,6 +476,55 @@ pub fn default_catalog() -> Catalog {
             asset_suffix: ".addon64".to_owned(),
         },
     ));
+
+    // The neural *consumers*. Exactly one may be installed: if a second is
+    // found loaded beside it, the first does nothing for the entire session,
+    // silently. That is the single worst failure mode in this ecosystem and
+    // the reason `conflicts_with` exists.
+    let mut chicken = component(
+        "deep-fried-chicken",
+        "Deep Fried Chicken",
+        "Performs the neural rendering. The recommended consumer - Feeder builds the request, this answers it.",
+        Role::Addon,
+        other(
+            "not published",
+            false,
+            "distributed through its author's Discord rather than a release page, so there is nothing to download automatically",
+        ),
+        "https://discord.gg/g2v2XGqvR",
+        Source::UserObtained {
+            from: "its author's Discord - take 1.4.8 or newer".to_owned(),
+            files: [
+                "deep-fried-chicken.addon64",
+                "deep-fried-chicken-nvngx.dll",
+                "deep-fried-chicken.cfg",
+            ]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        },
+    );
+    chicken.requires = vec!["reshade".to_owned(), "nvngx-dlssnr".to_owned()];
+    components.push(chicken);
+
+    let mut krish = component(
+        "renodx-dlss5",
+        "RenoDX DLSS 5 add-on",
+        "The older neural consumer, still fully supported. An alternative to Deep Fried Chicken - never both.",
+        Role::Addon,
+        other(
+            "not published",
+            false,
+            "distributed through the RenoDX Discord #DLSS5 channel rather than a release page",
+        ),
+        "https://discord.com/invite/renodx",
+        Source::UserObtained {
+            from: "the RenoDX Discord, #DLSS5 channel".to_owned(),
+            files: vec!["renodx-dlss5.addon64".to_owned()],
+        },
+    );
+    krish.requires = vec!["reshade".to_owned(), "nvngx-dlssnr".to_owned()];
+    components.push(krish);
 
     // ------------------------------------------------- hardware-gate unlocks
     let mut mfg = component(
@@ -589,6 +692,46 @@ pub fn default_catalog() -> Catalog {
         ));
     }
 
+    // The conflicts, applied symmetrically so neither order of installation
+    // produces a different answer. Each pair is a documented silent failure:
+    //
+    // - Two neural consumers: the first "does nothing at all for the whole
+    //   session - silently", per Feeder's README.
+    // - Feeder and the DX11 bridge: both authors say not to run both for one
+    //   game. Feeder does the bridge's job for games with no DLSS; the bridge
+    //   is for games that already have it.
+    // - OptiScaler alongside the Feeder route: Feeder's install notes say to
+    //   turn it off.
+    for (left, right) in [
+        ("deep-fried-chicken", "renodx-dlss5"),
+        ("dlss5-feeder", "dlss5-bridge"),
+        ("dlss5-feeder", "optiscaler"),
+    ] {
+        for (a, b) in [(left, right), (right, left)] {
+            if let Some(entry) = components.iter_mut().find(|item| item.id == a) {
+                entry.conflicts_with.push(b.to_owned());
+            }
+        }
+    }
+
+    // Feeder needs a host to load it, something to consume what it produces,
+    // and a motion-vector provider. The last is a hard dependency rather than
+    // a nicety: DLSS requires motion vectors and a game with no DLSS exposes
+    // none, so without a provider the route does not degrade - it does not
+    // work.
+    if let Some(feeder) = components.iter_mut().find(|item| item.id == "dlss5-feeder") {
+        feeder.requires = ["reshade", "lumenite", "nvngx-dlssnr"]
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect();
+    }
+    if let Some(bridge) = components.iter_mut().find(|item| item.id == "dlss5-bridge") {
+        bridge.requires = ["reshade", "nvngx-dlssnr"]
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect();
+    }
+
     Catalog {
         version: CATALOG_VERSION,
         components: components
@@ -731,6 +874,77 @@ mod tests {
             "it is research software and should say so"
         );
         assert_eq!(mfg.role, Role::AsiPlugin);
+    }
+
+    #[test]
+    fn the_two_neural_consumers_exclude_each_other() {
+        // The worst failure in this ecosystem: install both and the first does
+        // nothing for the entire session, silently. Feeder's README leads with
+        // it as the first thing to check when something looks broken.
+        let catalog = default_catalog();
+        let chicken = catalog.get("deep-fried-chicken").expect("chicken");
+        let krish = catalog.get("renodx-dlss5").expect("renodx-dlss5");
+        assert!(chicken.conflicts_with.contains(&krish.id));
+        assert!(krish.conflicts_with.contains(&chicken.id));
+    }
+
+    #[test]
+    fn the_feeder_and_the_bridge_are_alternatives_not_companions() {
+        // Feeder does the bridge's job for a game with no DLSS; the bridge is
+        // for one that already has it. Both authors say not to run both.
+        let catalog = default_catalog();
+        let feeder = catalog.get("dlss5-feeder").expect("feeder");
+        assert!(feeder.conflicts_with.contains(&"dlss5-bridge".to_owned()));
+        // And OptiScaler has to be off for the Feeder route.
+        assert!(feeder.conflicts_with.contains(&"optiscaler".to_owned()));
+    }
+
+    #[test]
+    fn a_one_sided_conflict_is_refused() {
+        // A conflict is a property of a pair. Declared on one side only, the
+        // warning a user sees would depend on which they installed second.
+        let mut catalog = default_catalog();
+        catalog
+            .components
+            .get_mut("renodx")
+            .expect("renodx")
+            .conflicts_with = vec!["optiscaler".to_owned()];
+        let refused = catalog.validate().expect_err("one-sided");
+        assert!(refused.detail.contains("does not say so"));
+    }
+
+    #[test]
+    fn the_feeder_route_declares_its_hard_dependencies() {
+        // A motion-vector provider is not optional: DLSS requires motion
+        // vectors, a game with no DLSS exposes none, so without a provider the
+        // route does not degrade - it does not work.
+        let catalog = default_catalog();
+        let feeder = catalog.get("dlss5-feeder").expect("feeder");
+        for needed in ["reshade", "lumenite", "nvngx-dlssnr"] {
+            assert!(
+                feeder.requires.contains(&needed.to_owned()),
+                "feeder should require {needed}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_discord_distributed_add_ons_say_so_rather_than_pretending() {
+        // Neither neural consumer is published anywhere fetchable. Naming the
+        // files a user must place is more use than an invented download.
+        let catalog = default_catalog();
+        for id in ["deep-fried-chicken", "renodx-dlss5"] {
+            let entry = catalog.get(id).expect(id);
+            match &entry.source {
+                Source::UserObtained { from, files } => {
+                    assert!(!from.is_empty());
+                    assert!(!files.is_empty(), "{id} should name its files");
+                }
+                other => panic!("{id} should be user-obtained, got {other:?}"),
+            }
+            assert_eq!(entry.source.trust(), Trust::UserSupplied);
+            assert!(!entry.source.we_redistribute());
+        }
     }
 
     #[test]

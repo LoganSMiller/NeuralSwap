@@ -154,6 +154,15 @@ impl Store {
                     reason: format!("shipped with NeuralSwap, at {rel}"),
                 })
             }
+            Source::UserObtained { from, files } => {
+                return Ok(Outcome::NotFetched {
+                    component: component.id.clone(),
+                    reason: format!(
+                        "not downloadable - get it from {from} and place: {}",
+                        files.join(", ")
+                    ),
+                })
+            }
             Source::LocalOnly { hint } => {
                 return Ok(Outcome::NotFetched {
                     component: component.id.clone(),
@@ -353,7 +362,8 @@ fn looks_like_an_archive(source: &Source) -> bool {
             // tests.
             lower.ends_with(".zip") || lower.ends_with(".exe")
         }
-        Source::Bundled { .. } | Source::LocalOnly { .. } => false,
+        // None of these are fetched, so nothing is ever unpacked from them.
+        Source::Bundled { .. } | Source::LocalOnly { .. } | Source::UserObtained { .. } => false,
     }
 }
 
@@ -460,6 +470,7 @@ mod tests {
                 asset_suffix: ".addon64".to_owned(),
             },
             requires: Vec::new(),
+            conflicts_with: Vec::new(),
             experimental: false,
         }
     }
