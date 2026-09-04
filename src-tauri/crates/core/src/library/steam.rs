@@ -226,6 +226,20 @@ mod tests {
         assert_eq!(found.len(), 2);
     }
 
+    /// A root that is absolute on whichever platform the tests run on.
+    ///
+    /// Real manifests only ever carry Windows paths, but asserting on a
+    /// rendered `D:\...` string makes the test fail on Linux over separator
+    /// style rather than over behaviour. The invariant worth checking is the
+    /// layout - library, then `steamapps/common`, then the install folder.
+    fn library_root() -> PathBuf {
+        PathBuf::from(if cfg!(windows) {
+            r"D:\SteamLibrary"
+        } else {
+            "/steamlibrary"
+        })
+    }
+
     #[test]
     fn an_installed_game_becomes_a_library_entry() {
         let document = r#"
@@ -237,12 +251,16 @@ mod tests {
 	"StateFlags"		"4"
 }
 "#;
-        let game = game_from_manifest(document, Path::new(r"D:\SteamLibrary")).expect("game");
+        let library = library_root();
+        let game = game_from_manifest(document, &library).expect("game");
         assert_eq!(game.name, "Cyberpunk 2077");
         assert_eq!(game.app_id.as_deref(), Some("1091500"));
         assert_eq!(
             game.dir,
-            PathBuf::from(r"D:\SteamLibrary\steamapps\common\Cyberpunk 2077")
+            library
+                .join("steamapps")
+                .join("common")
+                .join("Cyberpunk 2077")
         );
         assert_eq!(game.source, Source::Steam);
     }

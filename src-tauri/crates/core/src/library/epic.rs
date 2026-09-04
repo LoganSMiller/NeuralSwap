@@ -109,8 +109,19 @@ mod tests {
 
     #[test]
     fn the_folder_name_is_the_fallback_title() {
-        let document = r#"{ "InstallLocation": "D:\\Epic\\FolderName" }"#;
-        let game = game_from_manifest(document).expect("game");
+        // Built for the host platform: real manifests only ever carry Windows
+        // paths, but `file_name` does not split on a backslash off Windows, so
+        // hard-coding one would test the separator rather than the fallback.
+        let location = if cfg!(windows) {
+            r"D:\Epic\FolderName"
+        } else {
+            "/epic/FolderName"
+        };
+        let document = format!(
+            r#"{{ "InstallLocation": {} }}"#,
+            serde_json::to_string(location).expect("encode")
+        );
+        let game = game_from_manifest(&document).expect("game");
         assert_eq!(game.name, "FolderName");
         assert_eq!(game.app_id, None);
     }
