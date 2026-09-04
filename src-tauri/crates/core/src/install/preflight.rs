@@ -164,13 +164,20 @@ fn check_game_directory(game_dir: &Path) -> Check {
 ///
 /// `C:\XboxGames`, the newer Xbox layout, is an ordinary writable folder and
 /// is deliberately not caught here.
+///
+/// The segments are split here rather than by `Path::components`, for the same
+/// reason [`crate::fsx::paths`] applies its rules without consulting the host:
+/// `components` only recognises the separators of the platform it is compiled
+/// for, so off Windows this whole path arrives as one segment and the check
+/// silently passes. That is precisely the shape of the bug that made the path
+/// validator platform-dependent - refused on Windows, accepted on Linux - and
+/// a security check that answers differently by platform is not one worth
+/// having, even when only one platform ships.
 fn check_store_protected(game_dir: &Path) -> Check {
-    let protected = game_dir.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|text| text.eq_ignore_ascii_case("WindowsApps"))
-    });
+    let rendered = game_dir.to_string_lossy();
+    let protected = rendered
+        .split(['/', '\\'])
+        .any(|segment| segment.eq_ignore_ascii_case("WindowsApps"));
     if protected {
         fail_check(
             CheckName::StoreProtected,
@@ -514,6 +521,21 @@ mod tests {
         assert_eq!(check.code.as_deref(), Some("targetProtected"));
         // Refused, not attempted with elevation.
         assert!(check.detail.contains("owned by the system"));
+    }
+
+    #[test]
+    fn the_protected_location_check_does_not_depend_on_the_host_platform() {
+        // Both separators, both cases, and a lookalike that must not match.
+        // This runs on Linux in CI, where `Path::components` would see each of
+        // these as a single segment and let the first two through.
+        let protected =
+            |path: &str| check_store_protected(Path::new(path)).outcome == CheckOutcome::Fail;
+        assert!(protected(
+            "C:\\Program Files\\WindowsApps\\Publisher.Game_1.0"
+        ));
+        assert!(protected("C:/Program Files/windowsapps/Publisher.Game_1.0"));
+        assert!(!protected("C:\\XboxGames\\Some Game\\Content"));
+        assert!(!protected("D:\\Games\\WindowsAppsLauncher\\game"));
     }
 
     #[test]

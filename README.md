@@ -388,7 +388,7 @@ game folder:
 
 ## What exists, and what does not
 
-Ported to Rust and passing the vectors — 206 Rust tests, 111 reference tests:
+Ported to Rust and passing the vectors — 207 Rust tests, 111 reference tests:
 
 - Path safety, including the symlink walk and the cross-platform rules.
 - Durable atomic writes with the Windows transient-replace retry.
