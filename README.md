@@ -24,6 +24,15 @@ Nothing here is claimed to work that has not been run.
 
 ---
 
+## How DLSS works
+
+The technical reference is [docs/how-dlss-works.md](docs/how-dlss-works.md):
+the three layers, why the runtime has to sit beside the executable, what DLSS
+demands as input and therefore why the Feeder route needs optical flow, how
+Streamline's signature checking makes a mixed swap fail inside the game, and
+why what is on disk is not always what runs. Written from NVIDIA's own guides,
+and the decisions in this codebase that follow from it are listed at the end.
+
 ## Shape
 
 Rust + Tauri 2, rendering in the WebView2 already present on Windows.
@@ -40,7 +49,8 @@ src-tauri/
     src/zip/              hardened archive extraction
     src/pe/               PE inspection and its cache
     src/jobs/             locks and cancellable parallel sweeps
-    src/scan/             API detection, candidate ranking, folder walk
+    src/scan/             API detection, route selection, candidate ranking
+    src/components/       the third-party catalogue and its licence rules
     src/install/          plan, preflight, journal, manifest, apply, restore
     src/library/          Steam, Epic and Xbox discovery, and a VDF reader
     src/platform/         the few things that must ask Windows itself
