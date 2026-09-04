@@ -18,6 +18,11 @@ serde_json = "1.0"
 crc32fast = "1.5"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 memchr = "2.8.3"
+# Content hashing, so "is this the file I installed?" and "did this land
+# intact?" are answered by the bytes rather than by size and timestamp. The
+# RustCrypto implementation is pure Rust, so it adds no native toolchain
+# requirement and stays inside `cargo audit`'s reach.
+sha2 = "0.10"
 
 # Steam and GOG record where they are installed in the registry, and the
 # Vulkan layer will need to be registered there too. Microsoft's own small

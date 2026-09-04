@@ -13,6 +13,9 @@ fixtures, and must produce the same verdicts and the same error codes.
 | Archive extraction | 16 | `zip/cases.json` | `zip/*.zip.bin` |
 | PE inspection | 7 | `pe/cases.json` | `pe/*.pe.bin` |
 | Settings loading | 7 | `settings/cases.json` | `settings/*.json` |
+| Version ordering | 15 | `install/versions.json` | none |
+| Install planning | 23 | `install/plan.json` | none |
+| Journal recovery | 9 | `install/recovery.json` | none |
 
 The archives under `zip/` are **deliberately hostile** - they contain
 traversal entries, a symlink escape, bad checksums and a lying length header.

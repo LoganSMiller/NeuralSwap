@@ -161,7 +161,9 @@ fn modal_version(versions: &[Option<String>]) -> Option<String> {
         .map(|(version, _)| version)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// `Ord` so the install planner can group by kind in a `BTreeMap` and stay
+// deterministic without leaning on a hash order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeKind {
     /// `nvngx_dlss.dll` and friends - the upscaler itself.

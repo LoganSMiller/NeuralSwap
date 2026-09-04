@@ -12,6 +12,8 @@
 pub mod bytes;
 pub mod error;
 pub mod fsx;
+pub mod hash;
+pub mod install;
 pub mod jobs;
 pub mod library;
 pub mod pe;

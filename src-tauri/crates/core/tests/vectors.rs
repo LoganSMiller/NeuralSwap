@@ -659,3 +659,98 @@ fn the_pe_cache_survives_a_round_trip_through_json() {
     assert_eq!(revived.stats().hits, 1);
     assert_eq!(revived.stats().misses, 0);
 }
+
+#[test]
+fn version_ordering_vectors_match() {
+    use neuralswap_core::install::relate;
+
+    let table = read_table("install/versions.json");
+    let cases = table["cases"].as_array().expect("cases");
+    assert!(cases.len() >= 12, "the table lost cases: {}", cases.len());
+
+    for case in cases {
+        let why = case["why"].as_str().unwrap_or("");
+        let package = case["packageVersion"].as_str();
+        let present = case["presentVersion"].as_str();
+        let expect = case["expect"].as_str().expect("expect");
+
+        let actual = serde_json::to_value(relate(package, present)).expect("serialise");
+        assert_eq!(
+            actual.as_str(),
+            Some(expect),
+            "relate({package:?}, {present:?}) ({why})"
+        );
+    }
+}
+
+#[test]
+fn install_plan_vectors_match() {
+    use neuralswap_core::install::{build_plan, PlanInput};
+
+    let table = read_table("install/plan.json");
+    let cases = table["cases"].as_array().expect("cases");
+    assert!(cases.len() >= 20, "the table lost cases: {}", cases.len());
+
+    let mut refusals = 0;
+    for case in cases {
+        let name = case["name"].as_str().expect("name");
+        let why = case["why"].as_str().unwrap_or("");
+        let expect = &case["expect"];
+
+        // The input travels as JSON, so the two implementations are handed
+        // structurally identical data rather than each building its own.
+        let request: PlanInput =
+            serde_json::from_value(case["input"].clone()).unwrap_or_else(|error| {
+                panic!("case {name}: input does not deserialise: {error}");
+            });
+
+        match build_plan(&request) {
+            Ok(plan) => {
+                assert!(
+                    expect.get("refused").is_none(),
+                    "case {name} ({why}): expected refusal {:?}, got a plan",
+                    expect["refused"]
+                );
+                let actual = serde_json::to_value(&plan).expect("serialise");
+                // Compared whole. A reason, a byte total or a warning that
+                // differs is a divergence even when the file list agrees, and
+                // those are exactly the parts a user reads.
+                assert_eq!(&actual, expect, "case {name} ({why})");
+            }
+            Err(error) => {
+                let expected = expect["refused"].as_str().unwrap_or_else(|| {
+                    panic!(
+                        "case {name} ({why}): refused with {} but a plan was expected",
+                        error.code
+                    );
+                });
+                assert_eq!(error.code.as_str(), expected, "case {name} ({why})");
+                refusals += 1;
+            }
+        }
+    }
+    // The hostile half of the table is the half worth having, so a run that
+    // somehow produced no refusals at all has stopped testing anything.
+    assert!(refusals >= 8, "only {refusals} refusals replayed");
+}
+
+#[test]
+fn journal_recovery_vectors_match() {
+    use neuralswap_core::install::{decide_recovery, JournalState};
+
+    let table = read_table("install/recovery.json");
+    let cases = table["cases"].as_array().expect("cases");
+    assert!(cases.len() >= 8, "the table lost cases: {}", cases.len());
+
+    for case in cases {
+        let name = case["name"].as_str().expect("name");
+        let why = case["why"].as_str().unwrap_or("");
+        let state: JournalState =
+            serde_json::from_value(case["state"].clone()).unwrap_or_else(|error| {
+                panic!("case {name}: state does not deserialise: {error}");
+            });
+
+        let actual = serde_json::to_value(decide_recovery(&state)).expect("serialise");
+        assert_eq!(&actual, &case["expect"], "case {name} ({why})");
+    }
+}

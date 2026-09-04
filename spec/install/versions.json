@@ -1,0 +1,95 @@
+{
+  "note": "relate(packageVersion, presentVersion) -> newer|older|same|unknown. unknown when either side has no parsable version, and the caller must treat that as \"cannot claim this is an upgrade\" rather than as equality. A component that is not a plain number makes the whole string unparsable - accepting a numeric prefix is a bug.",
+  "cases": [
+    {
+      "packageVersion": "310.8.0.0",
+      "presentVersion": "310.1.0.0",
+      "why": "a straightforward upgrade",
+      "expect": "newer"
+    },
+    {
+      "packageVersion": "310.1.0.0",
+      "presentVersion": "310.8.0.0",
+      "why": "a straightforward downgrade",
+      "expect": "older"
+    },
+    {
+      "packageVersion": "310.8.0.0",
+      "presentVersion": "310.8.0.0",
+      "why": "identical",
+      "expect": "same"
+    },
+    {
+      "packageVersion": "310.8",
+      "presentVersion": "310.8.0.0",
+      "why": "trailing zeroes are not a difference",
+      "expect": "same"
+    },
+    {
+      "packageVersion": "310.8.0.0",
+      "presentVersion": "310.8",
+      "why": "the same, stated the other way round",
+      "expect": "same"
+    },
+    {
+      "packageVersion": "310, 8, 0, 0",
+      "presentVersion": "310.8.0.0",
+      "why": "a PE string table against a dotted version",
+      "expect": "same"
+    },
+    {
+      "packageVersion": "310.0.0.0",
+      "presentVersion": "9.0.0.0",
+      "why": "numeric, not lexical: 310 is not less than 9",
+      "expect": "newer"
+    },
+    {
+      "packageVersion": "2.13.0.0",
+      "presentVersion": "2.9.0.0",
+      "why": "numeric again, one component down",
+      "expect": "newer"
+    },
+    {
+      "packageVersion": null,
+      "presentVersion": "310.8.0.0",
+      "why": "no package version",
+      "expect": "unknown"
+    },
+    {
+      "packageVersion": "310.8.0.0",
+      "presentVersion": null,
+      "why": "no version resource on the file",
+      "expect": "unknown"
+    },
+    {
+      "packageVersion": null,
+      "presentVersion": null,
+      "why": "neither side has a version",
+      "expect": "unknown"
+    },
+    {
+      "packageVersion": "",
+      "presentVersion": "310.8.0.0",
+      "why": "an empty string is not a version",
+      "expect": "unknown"
+    },
+    {
+      "packageVersion": "not a version",
+      "presentVersion": "310.8.0.0",
+      "why": "unparsable text",
+      "expect": "unknown"
+    },
+    {
+      "packageVersion": "310.8.beta",
+      "presentVersion": "310.8.0.0",
+      "why": "a non-numeric component",
+      "expect": "unknown"
+    },
+    {
+      "packageVersion": "310.8abc",
+      "presentVersion": "310.8.0.0",
+      "why": "a numeric prefix must not be accepted as the number",
+      "expect": "unknown"
+    }
+  ]
+}

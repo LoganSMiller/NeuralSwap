@@ -20,7 +20,17 @@ export type ErrorCode =
   | 'zipEntryUnsafe'
   | 'zipChecksum'
   | 'peUnreadable'
-  | 'ipcBadRequest';
+  | 'badRequest'
+  // Install-time failures. These are the codes that can reach a user while
+  // something is being written into a game folder, so each one has to say
+  // enough for the UI to explain what state the folder is in.
+  | 'packageInvalid'
+  | 'journalCorrupt'
+  | 'targetLocked'
+  | 'targetProtected'
+  | 'insufficientSpace'
+  | 'verifyFailed'
+  | 'planStale';
 
 export class AppError extends Error {
   readonly code: ErrorCode;

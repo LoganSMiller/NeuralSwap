@@ -27,6 +27,9 @@ import { extractZip, DEFAULT_LIMITS } from '../src/core/zip/extract.ts';
 import { PeFile } from '../src/core/pe/reader.ts';
 import { SettingsStore } from '../src/main/state/store.ts';
 import { SCHEMA_VERSION } from '../src/main/state/schema.ts';
+import { buildPlan } from '../src/core/install/plan.ts';
+import { decideRecovery } from '../src/core/install/recover.ts';
+import { relate } from '../src/core/install/version.ts';
 import { AppError } from '../src/shared/errors.ts';
 import { buildZip } from '../test/fixtures/zipbuild.ts';
 import { buildPe } from '../test/fixtures/pebuild.ts';
@@ -35,7 +38,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const spec = path.join(root, 'spec');
 
 fs.rmSync(spec, { recursive: true, force: true });
-for (const dir of ['', 'zip', 'pe', 'settings']) {
+for (const dir of ['', 'zip', 'pe', 'settings', 'install']) {
   fs.mkdirSync(path.join(spec, dir), { recursive: true });
 }
 
@@ -412,13 +415,369 @@ writeJson('settings/cases.json', {
   cases: settingsRows
 });
 
+// --------------------------------------------------------- version ordering
+
+/**
+ * Version comparison decides whether an install is an upgrade or a downgrade,
+ * which is the one thing a user is guaranteed to notice getting wrong. The
+ * awkward cases are all real: PE string tables write `"310, 8, 0, 0"`, and
+ * component counts differ between a package name and a version resource.
+ *
+ * The prefix case is here because the two implementations disagreed. JavaScript's
+ * `parseInt('8abc')` returns 8, so `310.8abc` compared as `310.8`, while a
+ * strict parse rejects it. Strict is right, and this row is what holds both to it.
+ */
+const VERSION_CASES = [
+  ['310.8.0.0', '310.1.0.0', 'a straightforward upgrade'],
+  ['310.1.0.0', '310.8.0.0', 'a straightforward downgrade'],
+  ['310.8.0.0', '310.8.0.0', 'identical'],
+  ['310.8', '310.8.0.0', 'trailing zeroes are not a difference'],
+  ['310.8.0.0', '310.8', 'the same, stated the other way round'],
+  ['310, 8, 0, 0', '310.8.0.0', 'a PE string table against a dotted version'],
+  ['310.0.0.0', '9.0.0.0', 'numeric, not lexical: 310 is not less than 9'],
+  ['2.13.0.0', '2.9.0.0', 'numeric again, one component down'],
+  [null, '310.8.0.0', 'no package version'],
+  ['310.8.0.0', null, 'no version resource on the file'],
+  [null, null, 'neither side has a version'],
+  ['', '310.8.0.0', 'an empty string is not a version'],
+  ['not a version', '310.8.0.0', 'unparsable text'],
+  ['310.8.beta', '310.8.0.0', 'a non-numeric component'],
+  ['310.8abc', '310.8.0.0', 'a numeric prefix must not be accepted as the number']
+];
+
+writeJson('install/versions.json', {
+  note:
+    'relate(packageVersion, presentVersion) -> newer|older|same|unknown. unknown when either side has no parsable version, and the caller must treat that as "cannot claim this is an upgrade" rather than as equality. A component that is not a plain number makes the whole string unparsable - accepting a numeric prefix is a bug.',
+  cases: VERSION_CASES.map(([packageVersion, presentVersion, why]) => ({
+    packageVersion,
+    presentVersion,
+    why,
+    expect: relate(packageVersion, presentVersion)
+  }))
+});
+
+// ------------------------------------------------------------ install plan
+
+/**
+ * A plan is what the user agrees to before anything is written, so these cases
+ * are the record of what they will be shown. Every one is a real shape seen on
+ * a games drive rather than an invented edge: the mixed-version cohort and the
+ * stray copy in the game root both come from an actual install on the machine
+ * this was built on.
+ */
+const DLSS = { kind: 'dlss', version: '310.8.0.0', size: 1000, sha256: 'pkg-dlss-310800' };
+
+const PLAN_CASES = [
+  {
+    name: 'fresh-install',
+    why: 'nothing installed yet: create, no backup',
+    input: { installDir: 'bin/x64', pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }], present: [] }
+  },
+  {
+    name: 'already-identical',
+    why: 'the same bytes are already there, so the plan does nothing at all',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'bin/x64/nvngx_dlss.dll',
+          kind: 'dlss',
+          version: '310.8.0.0',
+          size: 1000,
+          sha256: 'pkg-dlss-310800',
+          managed: true
+        }
+      ]
+    }
+  },
+  {
+    name: 'upgrade',
+    why: 'a newer package version replaces an older file and backs it up',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'bin/x64/nvngx_dlss.dll',
+          kind: 'dlss',
+          version: '310.1.0.0',
+          size: 900,
+          sha256: 'game-dlss-310100',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'downgrade',
+    why: 'an older package version is still allowed, but must be named a downgrade',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'bin/x64/nvngx_dlss.dll',
+          kind: 'dlss',
+          version: '310.9.0.0',
+          size: 1100,
+          sha256: 'newer-than-package',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'same-version-different-bytes',
+    why: 'already swapped by hand: the version matches but the file does not',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'bin/x64/nvngx_dlss.dll',
+          kind: 'dlss',
+          version: '310.8.0.0',
+          size: 1000,
+          sha256: 'a-different-build',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'unknown-version-on-disk',
+    why: 'a DLL with no version resource is replaced without claiming an upgrade',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'bin/x64/nvngx_dlss.dll',
+          kind: 'dlss',
+          version: null,
+          size: 900,
+          sha256: 'unversioned',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'mixed-version-cohort',
+    why:
+      'upgrading one DLL and leaving its sibling behind at the old version - the shape that crashes a game on launch',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'bin/x64/nvngx_dlss.dll',
+          kind: 'dlss',
+          version: '310.1.0.0',
+          size: 900,
+          sha256: 'game-dlss-310100',
+          managed: false
+        },
+        {
+          rel: 'bin/x64/nvngx_dlssg.dll',
+          kind: 'dlss',
+          version: '310.1.0.0',
+          size: 800,
+          sha256: 'game-dlssg-310100',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'kinds-number-independently',
+    why: 'DLSS 310.8.0.0 beside Streamline 2.13.0.0 is correct and must not be flagged',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'bin/x64/sl.dlss.dll',
+          kind: 'streamline',
+          version: '2.13.0.0',
+          size: 500,
+          sha256: 'sl-dlss-21300',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'stray-copy-in-game-root',
+    why:
+      'a hand-placed copy where the loader will never look: not the target, and not part of the cohort',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'nvngx_dlss.dll',
+          kind: 'dlss',
+          version: '999.0.0.0',
+          size: 1200,
+          sha256: 'stray',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'adds-kind-not-present',
+    why: 'adding frame generation to a game that never shipped it is a bigger change',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [
+        { name: 'sl.dlss_g.dll', kind: 'streamline', version: '2.13.0.0', size: 700, sha256: 'slg' }
+      ],
+      present: [
+        {
+          rel: 'bin/x64/nvngx_dlss.dll',
+          kind: 'dlss',
+          version: '310.8.0.0',
+          size: 1000,
+          sha256: 'pkg-dlss-310800',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'install-into-game-root',
+    why: 'an empty install directory means the game folder itself',
+    input: {
+      installDir: '',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'nvngx_dlss.dll',
+          kind: 'dlss',
+          version: '310.1.0.0',
+          size: 900,
+          sha256: 'root-old',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'case-and-separator-insensitive',
+    why:
+      'the scanner reports backslashes and whatever case the directory entry had; NTFS says these are one file',
+    input: {
+      installDir: 'Bin/X64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }],
+      present: [
+        {
+          rel: 'bin\\x64\\NVNGX_DLSS.DLL',
+          kind: 'dlss',
+          version: '310.1.0.0',
+          size: 900,
+          sha256: 'other-case',
+          managed: false
+        }
+      ]
+    }
+  },
+  {
+    name: 'sort-order-is-stable',
+    why: 'steps are ordered by path, not by package order, so two runs agree',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [
+        { name: 'sl.dlss.dll', kind: 'streamline', version: '2.13.0.0', size: 3, sha256: 'c' },
+        { name: 'nvngx_dlss.dll', ...DLSS },
+        { name: 'sl.common.dll', kind: 'streamline', version: '2.13.0.0', size: 2, sha256: 'b' }
+      ],
+      present: []
+    }
+  },
+  // Refusals. A package entry is data from an archive, so it gets the same
+  // suspicion as a ZIP entry name.
+  { name: 'entry-traversal', why: 'a package entry escaping the install directory', input: { installDir: 'bin/x64', pkg: [{ name: '../escape.dll', ...DLSS }], present: [] } },
+  { name: 'entry-nested', why: 'a package entry with a separator is not a plain file name', input: { installDir: 'bin/x64', pkg: [{ name: 'sub/nested.dll', ...DLSS }], present: [] } },
+  { name: 'entry-absolute-windows', why: 'an absolute Windows path as a package entry', input: { installDir: 'bin/x64', pkg: [{ name: 'C:\\Windows\\evil.dll', ...DLSS }], present: [] } },
+  { name: 'entry-stream', why: 'an NTFS alternate data stream as a package entry', input: { installDir: 'bin/x64', pkg: [{ name: 'x.dll:hidden', ...DLSS }], present: [] } },
+  { name: 'entry-device-name', why: 'a DOS device name as a package entry', input: { installDir: 'bin/x64', pkg: [{ name: 'NUL', ...DLSS }], present: [] } },
+  { name: 'entry-trailing-dot', why: 'Win32 strips the trailing dot, so the validated name is not the opened name', input: { installDir: 'bin/x64', pkg: [{ name: 'evil.dll.', ...DLSS }], present: [] } },
+  { name: 'entry-nul-byte', why: 'a NUL byte truncates the path in Win32 APIs', input: { installDir: 'bin/x64', pkg: [{ name: `x${String.fromCharCode(0)}.dll`, ...DLSS }], present: [] } },
+  { name: 'entry-legitimate-lookalike', why: 'a name that merely contains a reserved stem is an ordinary file', input: { installDir: 'bin/x64', pkg: [{ name: 'nullify.dll', ...DLSS }], present: [] } },
+  { name: 'package-empty', why: 'a package with no runtime files is not an install', input: { installDir: 'bin/x64', pkg: [], present: [] } },
+  {
+    name: 'package-duplicate-entry',
+    why: 'two entries differing only in case are one file on NTFS',
+    input: {
+      installDir: 'bin/x64',
+      pkg: [{ name: 'nvngx_dlss.dll', ...DLSS }, { name: 'NVNGX_DLSS.DLL', ...DLSS }],
+      present: []
+    }
+  }
+];
+
+const planRows = PLAN_CASES.map((testCase) => {
+  const request = { route: 'nativeDll', ...testCase.input };
+  let expect;
+  try {
+    expect = buildPlan(request);
+  } catch (error) {
+    if (!(error instanceof AppError)) throw error;
+    expect = { refused: error.code };
+  }
+  return { name: testCase.name, why: testCase.why, input: request, expect };
+});
+
+writeJson('install/plan.json', {
+  note:
+    'buildPlan(input) is pure - no filesystem access - so the dry run a user approves and the run that follows cannot disagree. Compare the whole structure: steps in order, reasons, version transitions, byte totals and warnings. A `refused` value is the error code that must be raised instead. Paths in `present` may use either separator and any case; NTFS treats them as one file and so must the plan.',
+  cases: planRows
+});
+
+// -------------------------------------------------------- journal recovery
+
+/**
+ * The states an interrupted install can leave behind. Reaching these on
+ * purpose means staging a crash at an exact instant, which is why the decision
+ * is a pure function over what survived rather than a branch inside the
+ * writer.
+ */
+const RECOVERY_CASES = [
+  { name: 'no-plan', why: 'the journal was still being created; the plan is fsynced before any target is opened', state: { hasPlan: false, planReadable: false, committed: false, appliedSteps: 0, totalSteps: 0 } },
+  { name: 'plan-unreadable', why: 'without the plan we cannot know which backup belongs to which target, so it is kept rather than guessed at', state: { hasPlan: true, planReadable: false, committed: false, appliedSteps: 2, totalSteps: 4 } },
+  { name: 'committed', why: 'every step landed and verified; only the backups need clearing', state: { hasPlan: true, planReadable: true, committed: true, appliedSteps: 4, totalSteps: 4 } },
+  { name: 'committed-short-progress', why: 'the commit marker is the authority on completion - a progress log missing its last fsync is harmless', state: { hasPlan: true, planReadable: true, committed: true, appliedSteps: 3, totalSteps: 4 } },
+  { name: 'nothing-applied', why: 'a plan was written but no file was touched', state: { hasPlan: true, planReadable: true, committed: false, appliedSteps: 0, totalSteps: 4 } },
+  { name: 'partly-applied', why: 'the half-changed folder: roll back, because that needs only the backups sitting beside the journal', state: { hasPlan: true, planReadable: true, committed: false, appliedSteps: 2, totalSteps: 4 } },
+  { name: 'all-applied-not-committed', why: 'without the marker the last file is not known to be intact, so the folder is not known-good', state: { hasPlan: true, planReadable: true, committed: false, appliedSteps: 4, totalSteps: 4 } },
+  { name: 'progress-exceeds-plan', why: 'one of the two files is lying and guessing which means guessing what to restore', state: { hasPlan: true, planReadable: true, committed: false, appliedSteps: 5, totalSteps: 4 } },
+  { name: 'negative-counts', why: 'a crash can truncate the progress log mid-line; the parser must not talk us into restoring a negative number of files', state: { hasPlan: true, planReadable: true, committed: false, appliedSteps: -1, totalSteps: 4 } }
+];
+
+const recoveryRows = RECOVERY_CASES.map((testCase) => {
+  const state = { id: testCase.name, ...testCase.state };
+  return { name: testCase.name, why: testCase.why, state, expect: decideRecovery(state) };
+});
+
+writeJson('install/recovery.json', {
+  note:
+    'decideRecovery(state) over what survived on disk. discard removes an inert journal; rollBack restores the backups in reverse order; finishCleanup clears backups after a committed install; quarantine keeps the journal untouched and tells the user. The default for a half-applied install is rollBack, not roll-forward: finishing needs the source package to still exist and still be the same package, and neither can be assumed after an unclean shutdown.',
+  cases: recoveryRows
+});
+
 // -------------------------------------------------------------- summary
 
 const counts = {
   paths: PATH_CASES.length,
   zip: zipRows.length,
   pe: peRows.length,
-  settings: settingsRows.length
+  settings: settingsRows.length,
+  versions: VERSION_CASES.length,
+  plan: planRows.length,
+  recovery: recoveryRows.length
 };
 
 fs.writeFileSync(
@@ -438,6 +797,9 @@ fixtures, and must produce the same verdicts and the same error codes.
 | Archive extraction | ${counts.zip} | \`zip/cases.json\` | \`zip/*.zip.bin\` |
 | PE inspection | ${counts.pe} | \`pe/cases.json\` | \`pe/*.pe.bin\` |
 | Settings loading | ${counts.settings} | \`settings/cases.json\` | \`settings/*.json\` |
+| Version ordering | ${counts.versions} | \`install/versions.json\` | none |
+| Install planning | ${counts.plan} | \`install/plan.json\` | none |
+| Journal recovery | ${counts.recovery} | \`install/recovery.json\` | none |
 
 The archives under \`zip/\` are **deliberately hostile** - they contain
 traversal entries, a symlink escape, bad checksums and a lying length header.
@@ -462,5 +824,7 @@ risk in a port is silently dropping one of these cases.
 
 console.log(
   `exported ${Object.values(counts).reduce((a, b) => a + b, 0)} vectors to spec/ ` +
-    `(paths ${counts.paths}, zip ${counts.zip}, pe ${counts.pe}, settings ${counts.settings})`
+    `(paths ${counts.paths}, zip ${counts.zip}, pe ${counts.pe}, ` +
+    `settings ${counts.settings}, versions ${counts.versions}, ` +
+    `plan ${counts.plan}, recovery ${counts.recovery})`
 );

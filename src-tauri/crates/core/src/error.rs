@@ -23,6 +23,16 @@ pub enum Code {
     ZipChecksum,
     PeUnreadable,
     BadRequest,
+    // Install-time failures. These are the codes that can reach a user while
+    // something is being written into a game folder, so each one has to say
+    // enough for the UI to explain what state the folder is in.
+    PackageInvalid,
+    JournalCorrupt,
+    TargetLocked,
+    TargetProtected,
+    InsufficientSpace,
+    VerifyFailed,
+    PlanStale,
 }
 
 impl Code {
@@ -45,6 +55,13 @@ impl Code {
             Code::ZipChecksum => "zipChecksum",
             Code::PeUnreadable => "peUnreadable",
             Code::BadRequest => "badRequest",
+            Code::PackageInvalid => "packageInvalid",
+            Code::JournalCorrupt => "journalCorrupt",
+            Code::TargetLocked => "targetLocked",
+            Code::TargetProtected => "targetProtected",
+            Code::InsufficientSpace => "insufficientSpace",
+            Code::VerifyFailed => "verifyFailed",
+            Code::PlanStale => "planStale",
         }
     }
 }

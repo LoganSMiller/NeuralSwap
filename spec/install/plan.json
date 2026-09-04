@@ -1,0 +1,993 @@
+{
+  "note": "buildPlan(input) is pure - no filesystem access - so the dry run a user approves and the run that follows cannot disagree. Compare the whole structure: steps in order, reasons, version transitions, byte totals and warnings. A `refused` value is the error code that must be raised instead. Paths in `present` may use either separator and any case; NTFS treats them as one file and so must the plan.",
+  "cases": [
+    {
+      "name": "fresh-install",
+      "why": "nothing installed yet: create, no backup",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "create",
+            "reason": "newFile",
+            "kind": "dlss",
+            "fromVersion": null,
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 0,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "addsKindNotPresent",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 0,
+        "changes": 1
+      }
+    },
+    {
+      "name": "already-identical",
+      "why": "the same bytes are already there, so the plan does nothing at all",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800",
+            "managed": true
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "skip",
+            "reason": "identical",
+            "kind": "dlss",
+            "fromVersion": "310.8.0.0",
+            "toVersion": "310.8.0.0",
+            "writeBytes": 0,
+            "backupBytes": 0,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "nothingToDo",
+            "rels": []
+          }
+        ],
+        "writeBytes": 0,
+        "backupBytes": 0,
+        "changes": 0
+      }
+    },
+    {
+      "name": "upgrade",
+      "why": "a newer package version replaces an older file and backs it up",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.1.0.0",
+            "size": 900,
+            "sha256": "game-dlss-310100",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "replace",
+            "reason": "upgrade",
+            "kind": "dlss",
+            "fromVersion": "310.1.0.0",
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 900,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "replacesUnmanagedFile",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 900,
+        "changes": 1
+      }
+    },
+    {
+      "name": "downgrade",
+      "why": "an older package version is still allowed, but must be named a downgrade",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.9.0.0",
+            "size": 1100,
+            "sha256": "newer-than-package",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "replace",
+            "reason": "downgrade",
+            "kind": "dlss",
+            "fromVersion": "310.9.0.0",
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 1100,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "downgrade",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          },
+          {
+            "code": "replacesUnmanagedFile",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 1100,
+        "changes": 1
+      }
+    },
+    {
+      "name": "same-version-different-bytes",
+      "why": "already swapped by hand: the version matches but the file does not",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "a-different-build",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "replace",
+            "reason": "sameVersionDifferentBytes",
+            "kind": "dlss",
+            "fromVersion": "310.8.0.0",
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "replacesUnmanagedFile",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 1000,
+        "changes": 1
+      }
+    },
+    {
+      "name": "unknown-version-on-disk",
+      "why": "a DLL with no version resource is replaced without claiming an upgrade",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": null,
+            "size": 900,
+            "sha256": "unversioned",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "replace",
+            "reason": "versionUnknown",
+            "kind": "dlss",
+            "fromVersion": null,
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 900,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "replacesUnmanagedFile",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 900,
+        "changes": 1
+      }
+    },
+    {
+      "name": "mixed-version-cohort",
+      "why": "upgrading one DLL and leaving its sibling behind at the old version - the shape that crashes a game on launch",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.1.0.0",
+            "size": 900,
+            "sha256": "game-dlss-310100",
+            "managed": false
+          },
+          {
+            "rel": "bin/x64/nvngx_dlssg.dll",
+            "kind": "dlss",
+            "version": "310.1.0.0",
+            "size": 800,
+            "sha256": "game-dlssg-310100",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "replace",
+            "reason": "upgrade",
+            "kind": "dlss",
+            "fromVersion": "310.1.0.0",
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 900,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "replacesUnmanagedFile",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          },
+          {
+            "code": "mixedVersionsAfterInstall",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll",
+              "bin/x64/nvngx_dlssg.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 900,
+        "changes": 1
+      }
+    },
+    {
+      "name": "kinds-number-independently",
+      "why": "DLSS 310.8.0.0 beside Streamline 2.13.0.0 is correct and must not be flagged",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin/x64/sl.dlss.dll",
+            "kind": "streamline",
+            "version": "2.13.0.0",
+            "size": 500,
+            "sha256": "sl-dlss-21300",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "create",
+            "reason": "newFile",
+            "kind": "dlss",
+            "fromVersion": null,
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 0,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "addsKindNotPresent",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 0,
+        "changes": 1
+      }
+    },
+    {
+      "name": "stray-copy-in-game-root",
+      "why": "a hand-placed copy where the loader will never look: not the target, and not part of the cohort",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "999.0.0.0",
+            "size": 1200,
+            "sha256": "stray",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "create",
+            "reason": "newFile",
+            "kind": "dlss",
+            "fromVersion": null,
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 0,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "addsKindNotPresent",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 0,
+        "changes": 1
+      }
+    },
+    {
+      "name": "adds-kind-not-present",
+      "why": "adding frame generation to a game that never shipped it is a bigger change",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "sl.dlss_g.dll",
+            "kind": "streamline",
+            "version": "2.13.0.0",
+            "size": 700,
+            "sha256": "slg"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/sl.dlss_g.dll",
+            "action": "create",
+            "reason": "newFile",
+            "kind": "streamline",
+            "fromVersion": null,
+            "toVersion": "2.13.0.0",
+            "writeBytes": 700,
+            "backupBytes": 0,
+            "sha256": "slg"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "addsKindNotPresent",
+            "rels": [
+              "bin/x64/sl.dlss_g.dll"
+            ]
+          }
+        ],
+        "writeBytes": 700,
+        "backupBytes": 0,
+        "changes": 1
+      }
+    },
+    {
+      "name": "install-into-game-root",
+      "why": "an empty install directory means the game folder itself",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.1.0.0",
+            "size": 900,
+            "sha256": "root-old",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "",
+        "steps": [
+          {
+            "rel": "nvngx_dlss.dll",
+            "action": "replace",
+            "reason": "upgrade",
+            "kind": "dlss",
+            "fromVersion": "310.1.0.0",
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 900,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "replacesUnmanagedFile",
+            "rels": [
+              "nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 900,
+        "changes": 1
+      }
+    },
+    {
+      "name": "case-and-separator-insensitive",
+      "why": "the scanner reports backslashes and whatever case the directory entry had; NTFS says these are one file",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "Bin/X64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": [
+          {
+            "rel": "bin\\x64\\NVNGX_DLSS.DLL",
+            "kind": "dlss",
+            "version": "310.1.0.0",
+            "size": 900,
+            "sha256": "other-case",
+            "managed": false
+          }
+        ]
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "Bin/X64",
+        "steps": [
+          {
+            "rel": "Bin/X64/nvngx_dlss.dll",
+            "action": "replace",
+            "reason": "upgrade",
+            "kind": "dlss",
+            "fromVersion": "310.1.0.0",
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 900,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "replacesUnmanagedFile",
+            "rels": [
+              "Bin/X64/nvngx_dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 900,
+        "changes": 1
+      }
+    },
+    {
+      "name": "sort-order-is-stable",
+      "why": "steps are ordered by path, not by package order, so two runs agree",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "sl.dlss.dll",
+            "kind": "streamline",
+            "version": "2.13.0.0",
+            "size": 3,
+            "sha256": "c"
+          },
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          },
+          {
+            "name": "sl.common.dll",
+            "kind": "streamline",
+            "version": "2.13.0.0",
+            "size": 2,
+            "sha256": "b"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nvngx_dlss.dll",
+            "action": "create",
+            "reason": "newFile",
+            "kind": "dlss",
+            "fromVersion": null,
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 0,
+            "sha256": "pkg-dlss-310800"
+          },
+          {
+            "rel": "bin/x64/sl.common.dll",
+            "action": "create",
+            "reason": "newFile",
+            "kind": "streamline",
+            "fromVersion": null,
+            "toVersion": "2.13.0.0",
+            "writeBytes": 2,
+            "backupBytes": 0,
+            "sha256": "b"
+          },
+          {
+            "rel": "bin/x64/sl.dlss.dll",
+            "action": "create",
+            "reason": "newFile",
+            "kind": "streamline",
+            "fromVersion": null,
+            "toVersion": "2.13.0.0",
+            "writeBytes": 3,
+            "backupBytes": 0,
+            "sha256": "c"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "addsKindNotPresent",
+            "rels": [
+              "bin/x64/nvngx_dlss.dll",
+              "bin/x64/sl.common.dll",
+              "bin/x64/sl.dlss.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1005,
+        "backupBytes": 0,
+        "changes": 3
+      }
+    },
+    {
+      "name": "entry-traversal",
+      "why": "a package entry escaping the install directory",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "../escape.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    },
+    {
+      "name": "entry-nested",
+      "why": "a package entry with a separator is not a plain file name",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "sub/nested.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    },
+    {
+      "name": "entry-absolute-windows",
+      "why": "an absolute Windows path as a package entry",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "C:\\Windows\\evil.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    },
+    {
+      "name": "entry-stream",
+      "why": "an NTFS alternate data stream as a package entry",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "x.dll:hidden",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    },
+    {
+      "name": "entry-device-name",
+      "why": "a DOS device name as a package entry",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "NUL",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    },
+    {
+      "name": "entry-trailing-dot",
+      "why": "Win32 strips the trailing dot, so the validated name is not the opened name",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "evil.dll.",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    },
+    {
+      "name": "entry-nul-byte",
+      "why": "a NUL byte truncates the path in Win32 APIs",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "x\u0000.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    },
+    {
+      "name": "entry-legitimate-lookalike",
+      "why": "a name that merely contains a reserved stem is an ordinary file",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nullify.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "steps": [
+          {
+            "rel": "bin/x64/nullify.dll",
+            "action": "create",
+            "reason": "newFile",
+            "kind": "dlss",
+            "fromVersion": null,
+            "toVersion": "310.8.0.0",
+            "writeBytes": 1000,
+            "backupBytes": 0,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "addsKindNotPresent",
+            "rels": [
+              "bin/x64/nullify.dll"
+            ]
+          }
+        ],
+        "writeBytes": 1000,
+        "backupBytes": 0,
+        "changes": 1
+      }
+    },
+    {
+      "name": "package-empty",
+      "why": "a package with no runtime files is not an install",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    },
+    {
+      "name": "package-duplicate-entry",
+      "why": "two entries differing only in case are one file on NTFS",
+      "input": {
+        "route": "nativeDll",
+        "installDir": "bin/x64",
+        "pkg": [
+          {
+            "name": "nvngx_dlss.dll",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          },
+          {
+            "name": "NVNGX_DLSS.DLL",
+            "kind": "dlss",
+            "version": "310.8.0.0",
+            "size": 1000,
+            "sha256": "pkg-dlss-310800"
+          }
+        ],
+        "present": []
+      },
+      "expect": {
+        "refused": "packageInvalid"
+      }
+    }
+  ]
+}

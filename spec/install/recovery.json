@@ -1,0 +1,149 @@
+{
+  "note": "decideRecovery(state) over what survived on disk. discard removes an inert journal; rollBack restores the backups in reverse order; finishCleanup clears backups after a committed install; quarantine keeps the journal untouched and tells the user. The default for a half-applied install is rollBack, not roll-forward: finishing needs the source package to still exist and still be the same package, and neither can be assumed after an unclean shutdown.",
+  "cases": [
+    {
+      "name": "no-plan",
+      "why": "the journal was still being created; the plan is fsynced before any target is opened",
+      "state": {
+        "id": "no-plan",
+        "hasPlan": false,
+        "planReadable": false,
+        "committed": false,
+        "appliedSteps": 0,
+        "totalSteps": 0
+      },
+      "expect": {
+        "decision": "discard",
+        "reason": "noPlan"
+      }
+    },
+    {
+      "name": "plan-unreadable",
+      "why": "without the plan we cannot know which backup belongs to which target, so it is kept rather than guessed at",
+      "state": {
+        "id": "plan-unreadable",
+        "hasPlan": true,
+        "planReadable": false,
+        "committed": false,
+        "appliedSteps": 2,
+        "totalSteps": 4
+      },
+      "expect": {
+        "decision": "quarantine",
+        "reason": "planUnreadable"
+      }
+    },
+    {
+      "name": "committed",
+      "why": "every step landed and verified; only the backups need clearing",
+      "state": {
+        "id": "committed",
+        "hasPlan": true,
+        "planReadable": true,
+        "committed": true,
+        "appliedSteps": 4,
+        "totalSteps": 4
+      },
+      "expect": {
+        "decision": "finishCleanup",
+        "reason": "committed"
+      }
+    },
+    {
+      "name": "committed-short-progress",
+      "why": "the commit marker is the authority on completion - a progress log missing its last fsync is harmless",
+      "state": {
+        "id": "committed-short-progress",
+        "hasPlan": true,
+        "planReadable": true,
+        "committed": true,
+        "appliedSteps": 3,
+        "totalSteps": 4
+      },
+      "expect": {
+        "decision": "finishCleanup",
+        "reason": "committed"
+      }
+    },
+    {
+      "name": "nothing-applied",
+      "why": "a plan was written but no file was touched",
+      "state": {
+        "id": "nothing-applied",
+        "hasPlan": true,
+        "planReadable": true,
+        "committed": false,
+        "appliedSteps": 0,
+        "totalSteps": 4
+      },
+      "expect": {
+        "decision": "discard",
+        "reason": "nothingApplied"
+      }
+    },
+    {
+      "name": "partly-applied",
+      "why": "the half-changed folder: roll back, because that needs only the backups sitting beside the journal",
+      "state": {
+        "id": "partly-applied",
+        "hasPlan": true,
+        "planReadable": true,
+        "committed": false,
+        "appliedSteps": 2,
+        "totalSteps": 4
+      },
+      "expect": {
+        "decision": "rollBack",
+        "reason": "partiallyApplied"
+      }
+    },
+    {
+      "name": "all-applied-not-committed",
+      "why": "without the marker the last file is not known to be intact, so the folder is not known-good",
+      "state": {
+        "id": "all-applied-not-committed",
+        "hasPlan": true,
+        "planReadable": true,
+        "committed": false,
+        "appliedSteps": 4,
+        "totalSteps": 4
+      },
+      "expect": {
+        "decision": "rollBack",
+        "reason": "partiallyApplied"
+      }
+    },
+    {
+      "name": "progress-exceeds-plan",
+      "why": "one of the two files is lying and guessing which means guessing what to restore",
+      "state": {
+        "id": "progress-exceeds-plan",
+        "hasPlan": true,
+        "planReadable": true,
+        "committed": false,
+        "appliedSteps": 5,
+        "totalSteps": 4
+      },
+      "expect": {
+        "decision": "quarantine",
+        "reason": "progressExceedsPlan"
+      }
+    },
+    {
+      "name": "negative-counts",
+      "why": "a crash can truncate the progress log mid-line; the parser must not talk us into restoring a negative number of files",
+      "state": {
+        "id": "negative-counts",
+        "hasPlan": true,
+        "planReadable": true,
+        "committed": false,
+        "appliedSteps": -1,
+        "totalSteps": 4
+      },
+      "expect": {
+        "decision": "quarantine",
+        "reason": "negativeCounts"
+      }
+    }
+  ]
+}
