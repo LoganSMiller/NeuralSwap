@@ -39,7 +39,11 @@ export type RecoveryDecision =
   | 'discard'
   /** Restore the backups, in reverse order, then remove it. */
   | 'rollBack'
-  /** Everything landed. Only the backups and the journal need clearing. */
+  /**
+   * Everything landed. Remove the journal - but not the backups, which the
+   * install manifest points at so the game's original files can be put back
+   * later. Cleanup here means the bookkeeping, not the safety net.
+   */
   | 'finishCleanup'
   /** We cannot reason about it. Keep it, untouched, and tell the user. */
   | 'quarantine';

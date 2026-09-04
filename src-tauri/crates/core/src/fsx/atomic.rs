@@ -16,6 +16,36 @@ use crate::error::{fail, Code, Result};
 /// target. Rename is atomic on NTFS and on POSIX, so a reader sees either the
 /// whole old file or the whole new one and never a torn mixture.
 pub fn write_atomic(file: &Path, data: &[u8]) -> Result<()> {
+    replace_atomic(file, |handle| handle.write_all(data))
+}
+
+/// Durable replace of one file by another, streaming.
+///
+/// The same guarantee as [`write_atomic`], for content too large to want in
+/// memory: a runtime DLL can be tens of megabytes, and several of them in one
+/// install is a lot of allocation for no benefit when the bytes are only being
+/// moved from one file to another.
+pub fn copy_atomic(from: &Path, to: &Path) -> Result<()> {
+    let mut source = File::open(from).map_err(|error| {
+        crate::Error::new(
+            Code::StateUnwritable,
+            format!("could not open {}: {error}", from.display()),
+        )
+    })?;
+    replace_atomic(to, |handle| std::io::copy(&mut source, handle).map(|_| ()))
+}
+
+/// Write a sibling temp file with `fill`, flush it to the platter, then rename
+/// it over the target.
+///
+/// Rename is atomic on NTFS and on POSIX, so a reader sees either the whole
+/// old file or the whole new one and never a torn mixture. The temp file is
+/// removed on every failure path, including a failed rename, so a refused
+/// write leaves no litter beside the target.
+fn replace_atomic<F>(file: &Path, fill: F) -> Result<()>
+where
+    F: FnOnce(&mut File) -> std::io::Result<()>,
+{
     let parent = file.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(map_io("create parent directory", file))?;
 
@@ -29,7 +59,7 @@ pub fn write_atomic(file: &Path, data: &[u8]) -> Result<()> {
 
     let write = || -> std::io::Result<()> {
         let mut handle = File::create(&temp)?;
-        handle.write_all(data)?;
+        fill(&mut handle)?;
         handle.flush()?;
         // Flush the file's own contents before the rename makes it visible.
         handle.sync_all()?;

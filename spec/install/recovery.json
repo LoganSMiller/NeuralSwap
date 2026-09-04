@@ -1,5 +1,5 @@
 {
-  "note": "decideRecovery(state) over what survived on disk. discard removes an inert journal; rollBack restores the backups in reverse order; finishCleanup clears backups after a committed install; quarantine keeps the journal untouched and tells the user. The default for a half-applied install is rollBack, not roll-forward: finishing needs the source package to still exist and still be the same package, and neither can be assumed after an unclean shutdown.",
+  "note": "decideRecovery(state) over what survived on disk. discard removes an inert journal; rollBack restores the backups in reverse order and then removes them; finishCleanup removes the journal of a committed install but keeps its backups, which the install manifest points at so the original files can be put back later; quarantine keeps the journal untouched and tells the user. The default for a half-applied install is rollBack, not roll-forward: finishing needs the source package to still exist and still be the same package, and neither can be assumed after an unclean shutdown.",
   "cases": [
     {
       "name": "no-plan",

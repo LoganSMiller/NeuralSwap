@@ -13,9 +13,10 @@ a fork — see [ATTRIBUTION.md](ATTRIBUTION.md) for what it owes that project an
 for the third-party components the install routes orchestrate.
 
 **Status: the whole reference core is ported to Rust, library discovery and
-folder scanning work against real installs, and the app builds, installs at
-1.1 MB and runs.** The install routes and the trust features are not built yet
-— nothing is written to a game folder by any code path that exists today.
+folder scanning work against real installs, and the install engine — plan,
+preflight, write-ahead journal, verification and restore — is built and
+tested.** What is not yet wired is the front end for it and the packages
+themselves: the engine is exercised by its tests rather than by a button.
 
 The section at the bottom says precisely what exists and what does not.
 Nothing here is claimed to work that has not been run.
@@ -286,9 +287,89 @@ rediscovered at runtime.
 
 ---
 
+## Installing, and putting it back
+
+The part that writes. Split so that the code which *decides* cannot write, and
+the code which writes makes no decisions.
+
+**The plan is a pure function.** Every path, version transition and warning a
+user sees before they agree is derived from data, with no filesystem access,
+and the real run is handed that same structure. So the dry run and the install
+cannot disagree about what is about to happen. Upstream decided as it copied,
+which meant the only way to find out what an install would do was to let it
+happen, and a refusal half-way left the folder in a state nobody had described.
+
+Three warnings worth having, all of them shapes found on a real drive:
+
+| Warning | Why it matters |
+| --- | --- |
+| `replacesUnmanagedFile` | The file being overwritten is not one we installed. It may be the game's own, or a swap the user did by hand and has forgotten. |
+| `addsKindNotPresent` | Dropping frame generation into a game that never shipped it is a bigger change than swapping an upscaler. |
+| `mixedVersionsAfterInstall` | One DLL upgraded and its sibling left at the old version. This is how a swap turns into a crash on launch. |
+
+Version cohorts are compared **per kind**, because DLSS `310.8.0.0` beside
+Streamline `2.13.0.0` is correct — comparing across kinds would fire that last
+warning on every healthy install, which is worse than not having it.
+
+**Preflight runs every check, always**, even after one has already failed: game
+directory, store-protected location, path safety against the filesystem,
+writability by actually writing, files held open by a running game, free space
+on both the game and backup volumes, and the package's own contents. A user who
+is told "the game is running", fixes it, and is then told "not enough space" has
+been made to discover the situation twice.
+
+Titles under `WindowsApps` are **refused with an explanation** rather than
+attempted with elevation. Writing there means taking ownership of a system
+directory, which breaks the store's own repair path. `C:\XboxGames`, the newer
+layout, is an ordinary folder and is not caught by this.
+
+**The journal makes an interruption recoverable.** NTFS offers no way to
+replace several files as one transaction — transactional NTFS existed and
+Microsoft deprecated it — so an install touching four DLLs genuinely has three
+instants at which a power cut leaves a folder half-changed. The intent is
+fsynced before the first target file is opened, and each completed step is
+appended and flushed, so a later run can always answer what was happening and
+what should happen now.
+
+A half-applied install **rolls back rather than rolling forward**. Finishing
+would need the source package to still exist and still be the same package, and
+neither can be assumed after an unclean shutdown; rolling back needs only the
+backups sitting beside the journal, so it is the option that is always
+available. An install that fails rolls back through exactly the same code path
+that recovery-after-a-crash uses, so the two cannot drift apart. The result
+says how far it got — `nothingWritten`, `rolledBack` or `partiallyApplied` —
+because the only question a user actually has is what state their folder is in.
+
+**Backups outlive the journal.** The journal is bookkeeping and is deleted the
+moment an install commits; the displaced originals are kept permanently in a
+separate store, with the manifest pointing at them. An install from months ago
+is still reversible.
+
+**The manifest turns provenance into a fact.** The scanner's version-cohort
+heuristic works, but it is an inference; a manifest records that we wrote this
+file, at this version, with this hash. It also answers "is what I installed
+still there?" — a real question, because a game patch overwrites the very files
+a swap targets, which is why an upscaler swap silently reverts after an update.
+Verification names the files rather than shrugging.
+
+**Restore has no journal, deliberately.** Every step of it is an atomic replace
+or a delete, each independently correct, and the manifest is cleared only once
+all of them have finished — so an interrupted restore is repaired by running it
+again. Two judgements a naive restore gets wrong, both of which would damage a
+game folder:
+
+- A **missing backup** means our file stays. Deleting it would leave the game
+  with no runtime at all, which is worse than leaving it with a working one it
+  did not ship.
+- A file that is **no longer the one we installed** is left alone. The game has
+  moved on, and writing a months-old backup over a freshly patched file would
+  be the restore causing the damage it exists to undo.
+
+---
+
 ## What exists, and what does not
 
-Ported to Rust and passing the vectors — 108 Rust tests, 82 reference tests:
+Ported to Rust and passing the vectors — 187 Rust tests, 111 reference tests:
 
 - Path safety, including the symlink walk and the cross-platform rules.
 - Durable atomic writes with the Windows transient-replace retry.
@@ -304,6 +385,9 @@ Ported to Rust and passing the vectors — 108 Rust tests, 82 reference tests:
   candidate ranking, skip lists, runtime-file provenance.
 - Library discovery for Steam, Epic and Xbox, including a KeyValues reader.
 - The validated command boundary and the app shell.
+- The install engine: plan derivation, preflight, the write-ahead journal and
+  its recovery, content hashing, the install manifest with integrity
+  verification, and restore.
 
 Two examples point the code at a real machine and print what it found:
 
@@ -312,7 +396,13 @@ cargo run -p neuralswap-core --example list_library
 cargo run -p neuralswap-core --example scan_dir -- "<folder>"
 ```
 
-Two bugs the vectors caught in the Rust port, immediately:
+The TypeScript under `src/core` and `src/main` is now purely the reference
+implementation that `spec/` is generated from. Nothing in it ships.
+
+### What building it twice caught
+
+The case for the two-implementation approach is not theoretical. These are the
+defects it found, each within seconds or minutes of the two being compared:
 
 - The byte-limiting reader in the extractor checked its budget *before* each
   read but handed the full buffer to the inner reader, so a **stored** entry
@@ -321,22 +411,32 @@ Two bugs the vectors caught in the Rust port, immediately:
   does this correctly and there was no reason to hand-roll it.
 - `is_inside` sliced without a length check, which would panic rather than
   return `false`.
+- `parseInt('8abc')` returns `8` in JavaScript, so the reference accepted
+  `310.8abc` as `310.8` while a strict parse refused it. Strict is right, and a
+  vector row now holds both implementations to it.
+- `errors.ts` declared `ipcBadRequest` where Rust emits `badRequest` — in the
+  file whose stated purpose is being the contract between them.
+- Epic's `bIsIncompleteInstall` under `rename_all = "PascalCase"` becomes
+  `BIsIncompleteInstall`, which never matched, so every half-downloaded title
+  would have listed as installed.
 
-The TypeScript under `src/core` and `src/main` is now purely the reference
-implementation that `spec/` is generated from. Nothing in it ships.
+Two more came from running the code against this machine rather than against
+fixtures: the PE cache was write-only, so a rescan cost as much as a first scan
+(the scanner took `&mut PeCache` and could not share it with its own threads),
+and a hand-rolled substring search took six seconds on one 58 MB executable
+where `memchr::memmem` takes milliseconds.
 
-Not built at all:
+### Not built at all
 
-- Library discovery: finding installed games across Steam, Epic, GOG and Xbox
-  rather than being handed one folder at a time.
-- **The install routes** — native DLL swap, ReShade + Feeder, OptiScaler — and
-  the write-ahead journal that makes them reversible. This is the big one, and
-  until it exists NeuralSwap reads and reports but never writes.
-- The trust features: a dry-run plan showing every file that will be written
-  before anything is; integrity verification against a hash manifest, so a
-  game patch that clobbers an injected DLL is detected rather than silently
-  breaking; a one-screen preflight for GPU, driver, runtimes, writability and
-  conflicting injectors; and a redacted diagnostics bundle.
+- **The routes themselves.** The engine above installs a set of files into a
+  folder; what it does not yet have is the knowledge of *which* files, for
+  ReShade + Feeder and for OptiScaler, or where to fetch them. The native DLL
+  swap is the one the engine currently expresses end to end.
+- **The front end for installing.** The engine is driven by its tests, not by
+  a button: no command boundary, no plan screen, no progress reporting.
+- GOG discovery.
+- The remaining trust features: GPU, driver and conflicting-injector checks in
+  preflight, and a redacted diagnostics bundle.
 - Localisation. Upstream ships 38 languages in two hand-maintained
   1,300-line JavaScript objects with no key-coverage check.
 - Code signing and auto-update.

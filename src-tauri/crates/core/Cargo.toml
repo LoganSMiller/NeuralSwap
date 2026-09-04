@@ -29,6 +29,9 @@ sha2 = "0.10"
 # crate rather than the whole `windows` surface.
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
+# Free space on the volume a game lives on, for the preflight check. Already
+# in the dependency graph via Tauri, so naming it directly costs no new crate.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3"
