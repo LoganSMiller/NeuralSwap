@@ -30,7 +30,11 @@
 //! target - and which none of the tools in this space check at all.
 
 pub mod catalog;
+pub mod store;
+pub mod trust;
 
 pub use catalog::{
     default_catalog, Catalog, Component, Licence, Role, Source, Trust, CATALOG_VERSION,
 };
+pub use store::{Fetcher, Outcome as FetchOutcome, Ready, Resolved, Store};
+pub use trust::{Record, TrustStore, Verdict, TRUST_VERSION};
