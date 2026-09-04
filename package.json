@@ -1,6 +1,6 @@
 {
   "name": "neuralswap",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Neural-rendering upscaler management for PC games - detect, plan, install, verify, restore",
   "type": "module",
