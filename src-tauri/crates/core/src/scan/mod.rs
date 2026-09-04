@@ -1,10 +1,12 @@
 pub mod api;
 pub mod candidates;
+pub mod capability;
 pub mod folder;
 pub mod integration;
 
 pub use api::{detect, Api, Verdict, MARKERS};
 pub use candidates::{is_probably_not_a_game, should_skip_content, should_skip_dir, SKIP_DIRS};
+pub use capability::{all_outlooks, outlook, Feature, Input, Outlook, Quality};
 pub use folder::{
     scan_folder, Candidate, EmptyReason, FolderScan, RuntimeFile, RuntimeKind, RULES,
 };

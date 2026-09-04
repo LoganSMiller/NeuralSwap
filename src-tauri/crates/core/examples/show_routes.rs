@@ -47,6 +47,11 @@ fn main() {
             .rsplit_once(['/', '\\'])
             .map(|(dir, _)| dir.replace('\\', "/"))
             .unwrap_or_default();
+        // Which features the game itself feeds. Provenance-filtered: a file
+        // another tool added is not evidence the renderer tags anything.
+        let game_feeds =
+            neuralswap_core::scan::capability::Feature::fed_by_game(&scan.runtime_files);
+
         let has_native_dlss = scan.runtime_files.iter().any(|file| {
             file.kind == RuntimeKind::Dlss
                 && file
@@ -72,6 +77,22 @@ fn main() {
                 .join(" > ")
         );
         println!("  because    : {}", found.reason);
+
+        for entry in neuralswap_core::scan::capability::all_outlooks(
+            found.integration,
+            *found
+                .routes
+                .first()
+                .unwrap_or(&neuralswap_core::scan::Route::Feeder),
+            &game_feeds,
+        ) {
+            println!(
+                "    {:<18} {:?}  {}",
+                entry.feature.label(),
+                entry.quality,
+                entry.note
+            );
+        }
 
         // The imports the decision actually turned on.
         let interesting: Vec<&String> = imports

@@ -1,0 +1,730 @@
+//! Which DLSS features can actually work in a given game, and why not when
+//! they cannot.
+//!
+//! The ambition is every feature in every game. The reason that is not simply
+//! a matter of effort is that DLSS features consume *renderer-internal* data,
+//! and some of it does not exist anywhere outside the renderer that produced
+//! it. From the Streamline guides:
+//!
+//! - Every feature requires `cameraViewToClip`, `clipToPrevClip` and
+//!   `prevClipToClip`, row-major, and explicitly **without** the temporal-AA
+//!   jitter folded in - jitter is passed separately as `jitterOffset`.
+//! - Ray reconstruction additionally requires `kBufferTypeAlbedo` and
+//!   `kBufferTypeSpecularAlbedo` in a linear format, normals and roughness,
+//!   and specular hit distance.
+//!
+//! Albedo cannot be recovered from a finished frame: the lighting has already
+//! been applied to it. And a jittered input colour cannot be imposed from
+//! outside, because jitter is a change to how the game samples - which is
+//! precisely why the Feeder route describes what it supplies as a *synthetic
+//! DLAA contract* rather than upscaling.
+//!
+//! So this module does not pretend. It reports, per feature, whether the
+//! inputs are real, mirrored from the game's own DLSS, or estimated - and when
+//! they are estimated it says which ones, because that is where the difference
+//! between a game that looks excellent and one that looks wrong comes from.
+//!
+//! See `docs/how-dlss-works.md` §3 for the sourcing.
+//!
+//! # Two known rough edges
+//!
+//! Both were found by running this against real game folders, and neither is
+//! fixed yet:
+//!
+//! 1. **Ray reconstruction and neural rendering are modelled with the same
+//!    input set**, because neural rendering's requirements are not published
+//!    and ray reconstruction is the closest documented analogue. A consequence
+//!    is that a game feeding one is reported as feeding the other, so a title
+//!    with `nvngx_dlssnr.dll` but no `nvngx_dlssd.dll` is told ray
+//!    reconstruction is native when in fact its runtime is not even present.
+//!    The fix is to require the feature's own runtime to exist before calling
+//!    it native, and to distinguish "replace this" from "add this".
+//!
+//! 2. **Provenance cannot always tell a shipped runtime from an installed
+//!    one.** [`Feature::fed_by_game`] filters on version cohort, which catches
+//!    the common case, but a tool that installed a runtime matching its
+//!    siblings' versions is indistinguishable by that test. An install
+//!    manifest makes it a fact; short of that, an Authenticode check would
+//!    at least separate a genuine NVIDIA build from something else.
+
+use serde::{Deserialize, Serialize};
+
+use crate::scan::integration::{Integration, Route};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Feature {
+    /// Upscaling, or DLAA at native resolution.
+    SuperResolution,
+    /// Denoising for ray-traced rendering.
+    RayReconstruction,
+    /// Generated intermediate frames.
+    FrameGeneration,
+    /// DLSS 5 neural rendering.
+    NeuralRendering,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 4] = [
+        Feature::SuperResolution,
+        Feature::RayReconstruction,
+        Feature::FrameGeneration,
+        Feature::NeuralRendering,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Feature::SuperResolution => "Super Resolution",
+            Feature::RayReconstruction => "Ray Reconstruction",
+            Feature::FrameGeneration => "Frame Generation",
+            Feature::NeuralRendering => "Neural Rendering",
+        }
+    }
+
+    /// The runtime file that implements it.
+    pub const fn runtime(self) -> &'static str {
+        match self {
+            Feature::SuperResolution => "nvngx_dlss.dll",
+            Feature::RayReconstruction => "nvngx_dlssd.dll",
+            Feature::FrameGeneration => "nvngx_dlssg.dll",
+            Feature::NeuralRendering => "nvngx_dlssnr.dll",
+        }
+    }
+
+    /// The tagged resources it consumes, beyond the camera constants every
+    /// feature needs.
+    pub fn inputs(self) -> Vec<Input> {
+        let base = [Input::Depth, Input::MotionVectors, Input::CameraMatrices];
+        match self {
+            Feature::SuperResolution => {
+                let mut all = base.to_vec();
+                all.extend([Input::JitteredColor, Input::JitterOffset]);
+                all
+            }
+            Feature::FrameGeneration => {
+                let mut all = base.to_vec();
+                all.push(Input::HudLessColor);
+                all
+            }
+            // Ray reconstruction's requirements are documented; neural
+            // rendering's are not public, and it is modelled on the same
+            // G-buffer class because that is the closest documented analogue
+            // and matches what the community routes actually supply.
+            Feature::RayReconstruction | Feature::NeuralRendering => {
+                let mut all = base.to_vec();
+                all.extend([
+                    Input::JitteredColor,
+                    Input::Albedo,
+                    Input::SpecularAlbedo,
+                    Input::NormalsRoughness,
+                ]);
+                all
+            }
+        }
+    }
+
+    /// Whether this build is reasoning from documented requirements or from
+    /// inference. Stated because the UI should not present the two alike.
+    pub const fn requirements_documented(self) -> bool {
+        !matches!(self, Feature::NeuralRendering)
+    }
+
+    /// Which feature a runtime filename implements.
+    pub fn from_runtime(file_name: &str) -> Option<Feature> {
+        let lower = file_name.to_ascii_lowercase();
+        // Longest first: `nvngx_dlssd` and `nvngx_dlssg` both start with
+        // `nvngx_dlss`, so the plain upscaler has to be tested last.
+        for (needle, feature) in [
+            ("nvngx_dlssnr", Feature::NeuralRendering),
+            ("nvngx_dlssd", Feature::RayReconstruction),
+            ("nvngx_dlssg", Feature::FrameGeneration),
+            ("nvngx_dlss", Feature::SuperResolution),
+        ] {
+            if lower.starts_with(needle) {
+                return Some(feature);
+            }
+        }
+        None
+    }
+
+    /// Which features the *game itself* feeds, from the runtime files beside
+    /// its executable.
+    ///
+    /// Presence alone is not enough, and getting this wrong was a real bug.
+    /// The development machine has a game carrying `nvngx_dlssnr.dll` next to
+    /// `nvngx_dlssnr.dll.original` - another tool installed neural rendering
+    /// there and kept a backup. Counting that file as evidence the game feeds
+    /// neural rendering is exactly backwards: it is evidence somebody *added*
+    /// it, which says nothing about whether the renderer tags the G-buffer.
+    ///
+    /// So only a file that looks like part of the set the game shipped counts.
+    /// [`Provenance::ConsistentWithSiblings`] means it matches the versions of
+    /// its neighbours, which is what a matched install looks like; anything
+    /// added later stands out precisely because it does not.
+    pub fn fed_by_game(runtime_files: &[crate::scan::folder::RuntimeFile]) -> Vec<Feature> {
+        use crate::scan::folder::Provenance;
+        let mut found: Vec<Feature> = runtime_files
+            .iter()
+            .filter(|file| file.provenance == Provenance::ConsistentWithSiblings)
+            .filter_map(|file| {
+                let name = file.rel.rsplit(['/', '\\']).next().unwrap_or("");
+                Feature::from_runtime(name)
+            })
+            .collect();
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+
+    /// Whether a game that feeds `self` is thereby feeding everything `other`
+    /// needs.
+    ///
+    /// This is the question behind "my game has DLSS, so why can I not just
+    /// swap in neural rendering?". A game integrated for super resolution tags
+    /// depth, motion vectors and jittered colour. It has no reason to tag
+    /// albedo, normals or roughness, because nothing it shipped consumed them.
+    /// Ray reconstruction does tag those - which is why a game with ray
+    /// reconstruction is the one where neural rendering has a real path.
+    pub fn satisfies(self, other: Feature) -> bool {
+        let mine = self.inputs();
+        other.inputs().iter().all(|input| mine.contains(input))
+    }
+}
+
+/// A resource a feature consumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Input {
+    Depth,
+    MotionVectors,
+    /// Colour with the temporal jitter already applied by the renderer.
+    JitteredColor,
+    /// The sub-pixel offset the renderer used, passed separately.
+    JitterOffset,
+    /// Post-processed colour with no UI composited into it.
+    HudLessColor,
+    Albedo,
+    SpecularAlbedo,
+    NormalsRoughness,
+    /// View and clip matrices, row-major and jitter-free.
+    CameraMatrices,
+}
+
+/// How well an input can be supplied when the game does not provide it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Recovery {
+    /// Available or computable to a standard the feature can use.
+    Sound,
+    /// Obtainable, but as an estimate. This is where quality varies between
+    /// games, and it is worth naming rather than averaging away.
+    Estimated,
+    /// Cannot be imposed from outside: it would require the game to render
+    /// differently, not merely to hand something over.
+    NeedsRendererChange,
+}
+
+impl Input {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Input::Depth => "depth buffer",
+            Input::MotionVectors => "motion vectors",
+            Input::JitteredColor => "jittered colour",
+            Input::JitterOffset => "jitter offset",
+            Input::HudLessColor => "colour without the UI",
+            Input::Albedo => "albedo",
+            Input::SpecularAlbedo => "specular albedo",
+            Input::NormalsRoughness => "normals and roughness",
+            Input::CameraMatrices => "camera matrices",
+        }
+    }
+
+    /// What can be done about this input in a game with no DLSS integration.
+    pub const fn recovery(self) -> Recovery {
+        match self {
+            // ReShade locates the depth buffer, and its heuristics are the
+            // most battle-tested part of that project. Not infallible - it can
+            // choose the wrong target - but sound when it is right.
+            Input::Depth => Recovery::Sound,
+            // Computed by optical flow from consecutive frames. Genuinely
+            // usable, and genuinely not the renderer's own vectors: it cannot
+            // see through transparencies or know about objects that moved
+            // without changing pixels.
+            Input::MotionVectors => Recovery::Estimated,
+            // Derived from the depth buffer and frame-to-frame differences.
+            Input::CameraMatrices => Recovery::Estimated,
+            // Jitter is a change to how the game samples. Nothing outside the
+            // renderer can make it happen, which is why a fed route delivers
+            // DLAA at native resolution rather than upscaling.
+            Input::JitteredColor | Input::JitterOffset => Recovery::NeedsRendererChange,
+            // The UI is composited into the frame before anything outside the
+            // renderer sees it. Hooking earlier helps in some engines and not
+            // in others.
+            Input::HudLessColor => Recovery::Estimated,
+            // The G-buffer. Albedo cannot be recovered from a finished frame
+            // because the lighting has already been applied to it; the same
+            // goes for the rest. An estimate can be supplied and the feature
+            // will run, but it is running on invented data.
+            Input::Albedo | Input::SpecularAlbedo | Input::NormalsRoughness => Recovery::Estimated,
+        }
+    }
+}
+
+/// How a feature would be supplied in a given game.
+///
+/// Ordered best to worst, so a list of outlooks sorts into the order a user
+/// wants to read it: what works properly first, what cannot be done last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Quality {
+    /// The game provides every input itself. Swapping the runtime is the whole
+    /// job and the result is what the developer shipped, only newer.
+    Native,
+    /// The game's own DLSS is mirrored onto a private session, so the inputs
+    /// are real rather than estimated.
+    Mirrored,
+    /// Some inputs are estimated. Works, and how well is game-dependent.
+    Estimated,
+    /// Cannot be delivered: an input would require the game to render
+    /// differently.
+    OutOfReach,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Outlook {
+    pub feature: Feature,
+    pub quality: Quality,
+    pub route: Route,
+    /// Inputs that would be estimated rather than real, worst first.
+    pub estimated: Vec<Input>,
+    /// Inputs that cannot be supplied at all.
+    pub out_of_reach: Vec<Input>,
+    /// One sentence for the user. Says what they get, not what the code did.
+    pub note: String,
+    /// False when we are reasoning from inference rather than documentation.
+    pub documented: bool,
+}
+
+/// What each feature would look like in this game, on this route.
+pub fn outlook(
+    feature: Feature,
+    _integration: Integration,
+    route: Route,
+    game_feeds: &[Feature],
+) -> Outlook {
+    let documented = feature.requirements_documented();
+    let fed_by_game = game_feeds.iter().any(|have| have.satisfies(feature));
+
+    if route == Route::NativeSwap {
+        // The game satisfies this feature's contract already. Nothing is
+        // estimated, and a newer runtime simply does its job better.
+        if fed_by_game {
+            return Outlook {
+                feature,
+                quality: Quality::Native,
+                route,
+                estimated: Vec::new(),
+                out_of_reach: Vec::new(),
+                note: format!(
+                    "This game feeds {} itself, so replacing {} is all that is needed.",
+                    feature.label(),
+                    feature.runtime()
+                ),
+                documented,
+            };
+        }
+
+        // It has DLSS, but not this feature - so it never tags the resources
+        // this one consumes. Swapping the runtime in changes nothing, which is
+        // the most commonly misunderstood outcome in this whole space.
+        let missing: Vec<Input> = feature
+            .inputs()
+            .into_iter()
+            .filter(|input| !game_feeds.iter().any(|have| have.inputs().contains(input)))
+            .collect();
+        return Outlook {
+            feature,
+            quality: Quality::OutOfReach,
+            route,
+            estimated: Vec::new(),
+            out_of_reach: missing.clone(),
+            note: if missing.is_empty() {
+                format!(
+                    "This game does not use {}, so a newer runtime alone will not enable it.",
+                    feature.label()
+                )
+            } else {
+                format!(
+                    "This game has DLSS but not {}, so it never produces {}. Putting {} beside \
+                     it would change nothing - this feature needs one of the other routes.",
+                    feature.label(),
+                    list(&missing),
+                    feature.runtime()
+                )
+            },
+            documented,
+        };
+    }
+
+    // The bridge mirrors a real DLSS session, so the inputs it forwards are
+    // the game's own. What it cannot do is invent inputs the game never had.
+    if route == Route::Bridge {
+        return Outlook {
+            feature,
+            quality: Quality::Mirrored,
+            route,
+            estimated: Vec::new(),
+            out_of_reach: Vec::new(),
+            note: format!(
+                "This game's own DLSS is mirrored onto a private DirectX 12 session, so {} \
+                 runs on the game's real data.",
+                feature.label()
+            ),
+            documented,
+        };
+    }
+
+    // Everything else is fed. Sort the inputs by how well they can be
+    // supplied, and let the worst one decide the verdict.
+    let mut estimated: Vec<Input> = Vec::new();
+    let mut out_of_reach: Vec<Input> = Vec::new();
+    for input in feature.inputs() {
+        match input.recovery() {
+            Recovery::Sound => {}
+            Recovery::Estimated => estimated.push(input),
+            Recovery::NeedsRendererChange => out_of_reach.push(input),
+        }
+    }
+    estimated.sort_unstable();
+    out_of_reach.sort_unstable();
+
+    // Jitter is the interesting case. Super resolution without it is not
+    // broken - it is DLAA, which is the same network at native resolution.
+    // Saying "unavailable" would be wrong; saying "upscaling" would also be
+    // wrong.
+    let jitter_only = !out_of_reach.is_empty()
+        && out_of_reach
+            .iter()
+            .all(|input| matches!(input, Input::JitteredColor | Input::JitterOffset));
+
+    let (quality, note) = if jitter_only {
+        (
+            Quality::Estimated,
+            format!(
+                "{} can run, but at native resolution rather than upscaling: jitter is part of \
+                 how a game samples and cannot be added from outside.",
+                feature.label()
+            ),
+        )
+    } else if !out_of_reach.is_empty() {
+        (
+            Quality::OutOfReach,
+            format!(
+                "{} needs {} from inside the renderer, which cannot be supplied here.",
+                feature.label(),
+                list(&out_of_reach)
+            ),
+        )
+    } else if estimated.is_empty() {
+        (
+            Quality::Native,
+            format!("{} has everything it needs.", feature.label()),
+        )
+    } else {
+        (
+            Quality::Estimated,
+            format!(
+                "{} will run on estimated {}, so how well it looks depends on the game.",
+                feature.label(),
+                list(&estimated)
+            ),
+        )
+    };
+
+    Outlook {
+        feature,
+        quality,
+        route,
+        estimated,
+        out_of_reach,
+        note,
+        documented,
+    }
+}
+
+/// Every feature's outlook, best prospects first.
+pub fn all_outlooks(
+    integration: Integration,
+    route: Route,
+    game_feeds: &[Feature],
+) -> Vec<Outlook> {
+    let mut found: Vec<Outlook> = Feature::ALL
+        .iter()
+        .map(|feature| outlook(*feature, integration, route, game_feeds))
+        .collect();
+    found.sort_by_key(|entry| (entry.quality, entry.feature));
+    found
+}
+
+fn list(inputs: &[Input]) -> String {
+    let names: Vec<&str> = inputs.iter().map(|input| input.label()).collect();
+    match names.split_last() {
+        None => String::new(),
+        Some((last, [])) => (*last).to_owned(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_streamline_game_gets_everything_natively() {
+        for feature in Feature::ALL {
+            let found = outlook(
+                feature,
+                Integration::Streamline,
+                Route::NativeSwap,
+                &Feature::ALL,
+            );
+            assert_eq!(found.quality, Quality::Native, "{feature:?}");
+            assert!(found.estimated.is_empty());
+            assert!(found.out_of_reach.is_empty());
+            assert!(found.note.contains(feature.runtime()));
+        }
+    }
+
+    #[test]
+    fn super_resolution_without_integration_is_dlaa_not_upscaling() {
+        // The distinction that matters most and is most often fudged. Jitter
+        // is a change to the game's own sampling, so it cannot be imposed -
+        // which makes this the same network at native resolution.
+        let found = outlook(
+            Feature::SuperResolution,
+            Integration::None,
+            Route::Feeder,
+            &[],
+        );
+        assert_eq!(found.quality, Quality::Estimated);
+        assert!(found.out_of_reach.contains(&Input::JitteredColor));
+        assert!(found
+            .note
+            .contains("native resolution rather than upscaling"));
+    }
+
+    #[test]
+    fn neural_rendering_on_the_feeder_route_runs_on_estimated_g_buffer() {
+        // It does work - the community routes prove that - but albedo cannot
+        // be recovered from a finished frame, so it is estimated. Naming which
+        // inputs are invented is the honest version of "results vary".
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::None,
+            Route::Feeder,
+            &[],
+        );
+        assert_eq!(found.quality, Quality::Estimated);
+        for input in [
+            Input::Albedo,
+            Input::SpecularAlbedo,
+            Input::NormalsRoughness,
+        ] {
+            assert!(found.estimated.contains(&input), "{input:?}");
+        }
+        assert!(!found.documented, "NR's requirements are not published");
+    }
+
+    #[test]
+    fn the_bridge_supplies_real_data_rather_than_estimates() {
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::None,
+            Route::Bridge,
+            &[],
+        );
+        assert_eq!(found.quality, Quality::Mirrored);
+        assert!(found.estimated.is_empty());
+        assert!(found.note.contains("real data"));
+    }
+
+    #[test]
+    fn frame_generation_needs_a_frame_with_no_ui_in_it() {
+        let found = outlook(
+            Feature::FrameGeneration,
+            Integration::None,
+            Route::Feeder,
+            &[],
+        );
+        assert!(found.estimated.contains(&Input::HudLessColor));
+        assert_eq!(found.quality, Quality::Estimated);
+    }
+
+    #[test]
+    fn every_feature_names_its_runtime_and_needs_the_camera_matrices() {
+        for feature in Feature::ALL {
+            assert!(feature.runtime().starts_with("nvngx_"));
+            assert!(
+                feature.inputs().contains(&Input::CameraMatrices),
+                "{feature:?} - every SL feature requires the camera constants"
+            );
+            assert!(feature.inputs().contains(&Input::Depth));
+        }
+    }
+
+    #[test]
+    fn only_neural_rendering_is_flagged_as_undocumented() {
+        assert!(!Feature::NeuralRendering.requirements_documented());
+        for feature in [
+            Feature::SuperResolution,
+            Feature::RayReconstruction,
+            Feature::FrameGeneration,
+        ] {
+            assert!(feature.requirements_documented(), "{feature:?}");
+        }
+    }
+
+    #[test]
+    fn outlooks_are_ordered_with_the_best_prospects_first() {
+        let native = all_outlooks(Integration::Streamline, Route::NativeSwap, &Feature::ALL);
+        assert!(native.iter().all(|entry| entry.quality == Quality::Native));
+
+        let fed = all_outlooks(Integration::None, Route::Feeder, &[]);
+        assert_eq!(fed.len(), 4);
+        // Nothing is out of reach on the fed route - everything degrades to an
+        // estimate rather than becoming impossible.
+        assert!(fed.iter().all(|entry| entry.quality == Quality::Estimated));
+        // And each one says something specific about what is estimated.
+        assert!(fed.iter().all(|entry| !entry.note.is_empty()));
+    }
+
+    #[test]
+    fn a_game_with_only_upscaling_cannot_be_given_neural_rendering_by_a_swap() {
+        // The most misunderstood outcome in this space, and the reason this
+        // module exists. A game integrated for super resolution tags depth,
+        // motion vectors and jittered colour. It has no reason to tag albedo
+        // or normals, because nothing it shipped consumed them - so a newer
+        // runtime sitting beside it has nothing feeding it.
+        let feeds = [Feature::SuperResolution];
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &feeds,
+        );
+        assert_eq!(found.quality, Quality::OutOfReach);
+        assert!(found.out_of_reach.contains(&Input::Albedo));
+        assert!(found.note.contains("would change nothing"));
+
+        // Super resolution itself is of course fine.
+        let same = outlook(
+            Feature::SuperResolution,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &feeds,
+        );
+        assert_eq!(same.quality, Quality::Native);
+    }
+
+    #[test]
+    fn ray_reconstruction_is_what_opens_the_door_to_neural_rendering() {
+        // RR tags the G-buffer, so a game that has it is already producing
+        // what neural rendering needs. This is why the flagship NR titles are
+        // the path-traced ones.
+        assert!(Feature::RayReconstruction.satisfies(Feature::NeuralRendering));
+        assert!(!Feature::SuperResolution.satisfies(Feature::NeuralRendering));
+        // And frame generation is its own thing: it needs a UI-less frame that
+        // neither of the others produces.
+        assert!(!Feature::SuperResolution.satisfies(Feature::FrameGeneration));
+
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &[Feature::RayReconstruction],
+        );
+        assert_eq!(found.quality, Quality::Native);
+    }
+
+    #[test]
+    fn a_runtime_somebody_else_installed_is_not_evidence_the_game_feeds_it() {
+        // The bug this guards, found against a real game folder: a title with
+        // `nvngx_dlssnr.dll` beside `nvngx_dlssnr.dll.original` had neural
+        // rendering installed by another tool. Reading that as "the game feeds
+        // neural rendering" is backwards - it is evidence somebody added it.
+        use crate::scan::folder::{Provenance, RuntimeFile, RuntimeKind};
+
+        let shipped = |rel: &str| RuntimeFile {
+            rel: rel.to_owned(),
+            kind: RuntimeKind::Dlss,
+            version: Some("310.1.0.0".to_owned()),
+            provenance: Provenance::ConsistentWithSiblings,
+        };
+        let added = |rel: &str, provenance: Provenance| RuntimeFile {
+            rel: rel.to_owned(),
+            kind: RuntimeKind::Dlss,
+            version: Some("310.8.0.0".to_owned()),
+            provenance,
+        };
+
+        let files = vec![
+            shipped("bin/x64/nvngx_dlss.dll"),
+            added(
+                "bin/x64/nvngx_dlssnr.dll",
+                Provenance::VersionDiffersFromSiblings,
+            ),
+            added("bin/x64/nvngx_dlssg.dll", Provenance::OurInstall),
+        ];
+        let feeds = Feature::fed_by_game(&files);
+        assert_eq!(feeds, vec![Feature::SuperResolution]);
+
+        // And so neural rendering is reported as out of reach on a swap,
+        // rather than as already working.
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &feeds,
+        );
+        assert_eq!(found.quality, Quality::OutOfReach);
+    }
+
+    #[test]
+    fn features_are_recognised_from_their_runtime_filenames() {
+        // The prefixes overlap, so order matters: nvngx_dlssd and nvngx_dlssg
+        // both begin with nvngx_dlss.
+        assert_eq!(
+            Feature::from_runtime("nvngx_dlss.dll"),
+            Some(Feature::SuperResolution)
+        );
+        assert_eq!(
+            Feature::from_runtime("nvngx_dlssd.dll"),
+            Some(Feature::RayReconstruction)
+        );
+        assert_eq!(
+            Feature::from_runtime("nvngx_dlssg.dll"),
+            Some(Feature::FrameGeneration)
+        );
+        assert_eq!(
+            Feature::from_runtime("NVNGX_DLSSNR.DLL"),
+            Some(Feature::NeuralRendering)
+        );
+        assert_eq!(Feature::from_runtime("sl.dlss.dll"), None);
+        assert_eq!(Feature::from_runtime("d3d12.dll"), None);
+    }
+
+    #[test]
+    fn the_input_list_reads_as_a_sentence() {
+        assert_eq!(list(&[]), "");
+        assert_eq!(list(&[Input::Depth]), "depth buffer");
+        assert_eq!(
+            list(&[Input::Depth, Input::Albedo]),
+            "depth buffer and albedo"
+        );
+        assert_eq!(
+            list(&[Input::Depth, Input::Albedo, Input::MotionVectors]),
+            "depth buffer, albedo and motion vectors"
+        );
+    }
+}
