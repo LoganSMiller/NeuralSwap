@@ -1,0 +1,64 @@
+[workspace]
+members = [".", "crates/core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+# The core writes files into other people's game folders, so an unexplained
+# panic in front of a user mid-install is the failure worth spending a lint on.
+# These fire rarely and every hit is worth reading.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+# `indexing_slicing`, `cast_possible_truncation` and `cast_sign_loss` were
+# tried here and removed. This code parses binary headers, where narrowing a
+# validated `u64` offset to `usize` and indexing a bounds-checked slice are the
+# normal operations - they produced seventy warnings across code that was
+# already correct, which is how a lint stops being read at all. Genuine cases
+# are caught instead by the bounds-checked accessors in `zip::read` and by
+# `try_from` at the places where a value really could be out of range.
+
+[package]
+name = "neuralswap"
+description = "Neural-rendering upscaler management for PC games"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "neuralswap_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+neuralswap-core = { path = "crates/core" }
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+
+[profile.release]
+# A smaller binary is the point of leaving Electron, and it is also a better
+# antivirus and SmartScreen reputation story: one small artefact rather than a
+# hundred and fifty megabytes of unsigned files.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,90 @@
+{
+  "note": "extractZip(file, freshEmptyDirectory). \"ok\" means every entry extracted and verified; anything else is the error code. On any failure the destination must contain no files - validation precedes writing.",
+  "limits": {
+    "maxEntries": 20000,
+    "maxEntryBytes": 536870912,
+    "maxTotalBytes": 2147483648
+  },
+  "cases": [
+    {
+      "file": "zip/benign.zip.bin",
+      "why": "a normal archive: deflated, stored, and a directory entry",
+      "expect": "ok"
+    },
+    {
+      "file": "zip/empty-file.zip.bin",
+      "why": "a zero-length entry is a file, not an error",
+      "expect": "ok"
+    },
+    {
+      "file": "zip/traversal-slash.zip.bin",
+      "why": "a ../ entry must be refused before anything is written",
+      "expect": "unsafePath"
+    },
+    {
+      "file": "zip/traversal-backslash.zip.bin",
+      "why": "7-Zip and older Windows archivers write backslash separators",
+      "expect": "unsafePath"
+    },
+    {
+      "file": "zip/absolute-posix.zip.bin",
+      "why": "an absolute entry name",
+      "expect": "unsafePath"
+    },
+    {
+      "file": "zip/absolute-windows.zip.bin",
+      "why": "an absolute Windows entry name",
+      "expect": "unsafePath"
+    },
+    {
+      "file": "zip/symlink-escape.zip.bin",
+      "why": "GHSA-jmr9-qjv8-65gv exactly: a symlink out of the tree, then a write through it",
+      "expect": "zipEntryUnsafe"
+    },
+    {
+      "file": "zip/unix-mode-regular-file.zip.bin",
+      "why": "refusing symlinks must not mean refusing archives built on Linux",
+      "expect": "ok"
+    },
+    {
+      "file": "zip/device-name.zip.bin",
+      "why": "a DOS device name as an entry",
+      "expect": "reservedName"
+    },
+    {
+      "file": "zip/device-name-nested.zip.bin",
+      "why": "a DOS device name on an interior segment",
+      "expect": "reservedName"
+    },
+    {
+      "file": "zip/bad-crc.zip.bin",
+      "why": "a CRC-32 that does not match the data",
+      "expect": "zipChecksum"
+    },
+    {
+      "file": "zip/lying-length.zip.bin",
+      "why": "a declared uncompressed size that does not match the data",
+      "expect": "zipChecksum"
+    },
+    {
+      "file": "zip/unsupported-method.zip.bin",
+      "why": "method 14 is LZMA: valid ZIP, but not something we decode",
+      "expect": "zipUnsupported"
+    },
+    {
+      "file": "zip/encrypted.zip.bin",
+      "why": "an encrypted entry is refused, not silently skipped",
+      "expect": "zipUnsupported"
+    },
+    {
+      "file": "zip/not-a-zip.zip.bin",
+      "why": "a file that is not a ZIP",
+      "expect": "zipInvalid"
+    },
+    {
+      "file": "zip/truncated.zip.bin",
+      "why": "a truncated download",
+      "expect": "zipInvalid"
+    }
+  ]
+}

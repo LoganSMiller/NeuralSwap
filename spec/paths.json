@@ -1,0 +1,151 @@
+{
+  "note": "assertSafeRelative(rel, root). \"ok\" means accepted; anything else is the error code that must be raised. Non-string input (null, numbers) must also be refused as unsafePath.",
+  "root": "C:\\games\\example",
+  "cases": [
+    {
+      "rel": "bin/game.exe",
+      "why": "an ordinary relative path",
+      "expect": "ok"
+    },
+    {
+      "rel": "game.exe",
+      "why": "a file at the root",
+      "expect": "ok"
+    },
+    {
+      "rel": "bin\\x64\\game.exe",
+      "why": "backslash separators, as every Windows manifest writes them",
+      "expect": "ok"
+    },
+    {
+      "rel": "../escape.txt",
+      "why": "classic traversal",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "bin/../../escape.txt",
+      "why": "traversal that nets out above the root",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "bin\\..\\..\\escape.txt",
+      "why": "the same attack wearing the other separator",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "bin/../game.exe",
+      "why": "a .. that nets out inside the root, still refused",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "/etc/passwd",
+      "why": "an absolute POSIX path",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "C:\\Windows\\System32\\evil.dll",
+      "why": "an absolute Windows path",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "\\\\server\\share\\evil.dll",
+      "why": "a UNC path",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "game.exe:hidden",
+      "why": "an NTFS alternate data stream",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "a\u0000b",
+      "why": "a NUL byte, which truncates the path in Win32 APIs",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "evil.",
+      "why": "a trailing dot, which Win32 silently strips",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "evil ",
+      "why": "a trailing space, which Win32 silently strips",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "sub./file.txt",
+      "why": "a trailing dot on an interior segment",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": "",
+      "why": "the empty string",
+      "expect": "unsafePath"
+    },
+    {
+      "rel": ".",
+      "why": "the root itself, which is not a path inside the root",
+      "expect": "outsideRoot"
+    },
+    {
+      "rel": "CON",
+      "why": "a DOS device name",
+      "expect": "reservedName"
+    },
+    {
+      "rel": "con",
+      "why": "a DOS device name, lower case",
+      "expect": "reservedName"
+    },
+    {
+      "rel": "NUL",
+      "why": "a DOS device name",
+      "expect": "reservedName"
+    },
+    {
+      "rel": "aux",
+      "why": "a DOS device name",
+      "expect": "reservedName"
+    },
+    {
+      "rel": "COM1",
+      "why": "a DOS device name",
+      "expect": "reservedName"
+    },
+    {
+      "rel": "LPT9",
+      "why": "a DOS device name",
+      "expect": "reservedName"
+    },
+    {
+      "rel": "nul.txt",
+      "why": "a DOS device name carrying an extension",
+      "expect": "reservedName"
+    },
+    {
+      "rel": "bin/CON",
+      "why": "a DOS device name on an interior segment",
+      "expect": "reservedName"
+    },
+    {
+      "rel": "console.dll",
+      "why": "merely starts with a reserved stem - a legitimate file",
+      "expect": "ok"
+    },
+    {
+      "rel": "nullify.txt",
+      "why": "merely starts with a reserved stem - a legitimate file",
+      "expect": "ok"
+    },
+    {
+      "rel": "com.exe",
+      "why": "merely starts with a reserved stem - a legitimate file",
+      "expect": "ok"
+    },
+    {
+      "rel": "lpt.dll",
+      "why": "merely starts with a reserved stem - a legitimate file",
+      "expect": "ok"
+    }
+  ]
+}

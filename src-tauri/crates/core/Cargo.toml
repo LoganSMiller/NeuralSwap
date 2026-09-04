@@ -1,0 +1,29 @@
+[package]
+name = "neuralswap-core"
+description = "Host-agnostic core: path safety, durable writes, archive extraction, PE inspection, settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Pure-Rust inflate. `rust_backend` selects miniz_oxide rather than linking a C
+# zlib, which keeps the build free of a native toolchain dependency and keeps
+# the dependency tree auditable.
+crc32fast = "1.5"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+memchr = "2.8.3"
+
+# Steam and GOG record where they are installed in the registry, and the
+# Vulkan layer will need to be registered there too. Microsoft's own small
+# crate rather than the whole `windows` surface.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
+[dev-dependencies]
+tempfile = "3"

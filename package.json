@@ -1,0 +1,32 @@
+{
+  "name": "neuralswap",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Neural-rendering upscaler management for PC games - detect, plan, install, verify, restore",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "test": "node --test \"test/unit/*.test.ts\"",
+    "test:watch": "node --test --watch \"test/unit/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "ci": "npm run lint && npm run typecheck && npm test",
+    "vectors": "node scripts/export-vectors.mjs",
+    "bench": "node scripts/bench-pe.mjs",
+    "build:web": "node scripts/build-web.mjs",
+    "dev": "tauri dev",
+    "app:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}

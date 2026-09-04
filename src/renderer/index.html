@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NeuralSwap</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="name">NeuralSwap</span>
+        <span class="version" id="version"></span>
+      </div>
+      <div class="controls">
+        <button type="button" id="minimize" aria-label="Minimise">&#x2013;</button>
+        <button type="button" id="maximize" aria-label="Maximise">&#x25a1;</button>
+        <button type="button" id="close" aria-label="Close">&#x2715;</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- Settings health is shown, never hidden. A user whose settings file
+           was truncated should be told, not silently handed defaults. -->
+      <section id="health" class="card" hidden>
+        <h2 id="health-title"></h2>
+        <p id="health-detail"></p>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Your games</h2>
+          <div class="actions">
+            <button type="button" id="add-game">Add a folder&hellip;</button>
+            <button type="button" id="refresh" class="primary">Refresh</button>
+          </div>
+        </div>
+        <p class="muted" id="library-status" role="status"></p>
+        <div id="library"></div>
+      </section>
+
+      <section class="card" id="scan-panel" hidden>
+        <div class="card-head">
+          <h2 id="scan-title">Scan</h2>
+          <div class="actions">
+            <button type="button" id="scan-close">Close</button>
+          </div>
+        </div>
+        <p class="muted" id="scan-hint"></p>
+        <p class="mono" id="scan-path" hidden></p>
+
+        <div id="scan-result" hidden>
+          <table id="candidates">
+            <caption class="visually-hidden">Executables found, best first</caption>
+            <thead>
+              <tr>
+                <th scope="col">Executable</th>
+                <th scope="col">API</th>
+                <th scope="col">Bits</th>
+                <th scope="col">Size</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div id="runtimes" hidden>
+            <h3>Upscaler runtime files in this folder</h3>
+            <ul id="runtime-list" class="runtime-list"></ul>
+          </div>
+          <p class="muted" id="scan-extra"></p>
+        </div>
+        <p id="scan-empty" class="muted" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>Appearance</h2>
+        <div class="row">
+          <label for="theme">Theme</label>
+          <select id="theme">
+            <option value="system">Follow the system</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="group">Group games by store</label>
+          <input type="checkbox" id="group" />
+        </div>
+        <p class="muted" id="save-state" role="status"></p>
+      </section>
+
+      <section class="card">
+        <h2>Status</h2>
+        <dl id="facts"></dl>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

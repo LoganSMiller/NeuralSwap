@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is what ships, and the only platform where the path rules
+        # this code depends on actually apply. Linux runs too: it is where
+        # contributors work, and it catches an assumption that only holds on
+        # one of the two - which is exactly the class of bug the path rules
+        # were rewritten to eliminate.
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Format
+        working-directory: src-tauri
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # `--workspace` matters: without it cargo tests only the root package and
+      # silently skips the core crate, which is where the vectors live.
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --workspace
+
+  frontend:
+    name: frontend and vectors
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Native TypeScript type stripping, so the reference implementation
+          # and its tests run with no build step.
+          node-version: '22.18'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build the frontend
+        run: npm run build:web
+
+      # Regenerating must produce exactly what is committed. If it does not,
+      # the reference implementation changed and the vectors were not updated -
+      # which would leave the Rust core held to a specification the reference
+      # no longer follows.
+      - name: Vectors are up to date
+        shell: bash
+        run: |
+          npm run vectors
+          if ! git diff --quiet -- spec; then
+            echo "spec/ is stale - run 'npm run vectors' and commit the result"
+            git diff --stat -- spec
+            exit 1
+          fi
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18'
+          cache: npm
+      - run: npm ci
+      # There are no production npm dependencies, so this must stay clean. The
+      # project this one learns from failed here on its single runtime
+      # dependency, whose advisory had no fixed version to upgrade to.
+      - name: npm production dependencies
+        run: npm audit --omit=dev --audit-level=low
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,188 @@
+{
+  "note": "Open each file as the settings store. status is one of fresh|loaded|migrated|recoveredFromBackup|quarantined, or \"refused\" with a code when the file belongs to a newer build. A file that cannot be read must be set aside, never deleted, and never silently replaced with defaults.",
+  "schemaVersion": 2,
+  "cases": [
+    {
+      "file": "settings/v1-upstream.json",
+      "why": "the upstream library.json layout migrates forward rather than being discarded",
+      "expect": {
+        "status": "migrated",
+        "settings": {
+          "schema": 2,
+          "theme": "dark",
+          "lang": "de",
+          "groupGamesByStore": true,
+          "autoScanDrives": false,
+          "folders": [
+            "E:\\SteamLibrary"
+          ],
+          "excludedRoots": [],
+          "manual": [],
+          "hidden": [
+            "E:\\SteamLibrary\\Skyrim"
+          ],
+          "posters": {
+            "abc123": "C:\\posters\\abc123.png"
+          },
+          "scans": {},
+          "art": {},
+          "recents": [],
+          "addons": [
+            {
+              "path": "C:\\builds\\other.addon64",
+              "name": "Other",
+              "notes": [],
+              "enabled": false
+            },
+            {
+              "path": "C:\\builds\\renodx-dlss.addon64",
+              "name": null,
+              "notes": [],
+              "enabled": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "file": "settings/current.json",
+      "why": "a file at the current schema loads unchanged",
+      "expect": {
+        "status": "loaded",
+        "settings": {
+          "schema": 2,
+          "theme": "system",
+          "lang": "ja",
+          "groupGamesByStore": true,
+          "autoScanDrives": false,
+          "folders": [
+            "D:\\Games"
+          ],
+          "excludedRoots": [],
+          "manual": [],
+          "hidden": [],
+          "posters": {},
+          "scans": {},
+          "art": {},
+          "recents": [],
+          "addons": []
+        }
+      }
+    },
+    {
+      "file": "settings/partly-malformed.json",
+      "why": "one bad field costs that field, not the other forty",
+      "expect": {
+        "status": "loaded",
+        "settings": {
+          "schema": 2,
+          "theme": "system",
+          "lang": "es",
+          "groupGamesByStore": true,
+          "autoScanDrives": false,
+          "folders": [
+            "G:\\Games"
+          ],
+          "excludedRoots": [],
+          "manual": [],
+          "hidden": [],
+          "posters": {},
+          "scans": {
+            "abc": {
+              "ok": true,
+              "api": null,
+              "apiLabel": null,
+              "bitness": null,
+              "exe": null,
+              "dlssVersion": null,
+              "routes": [],
+              "reason": null,
+              "scannedAt": 5,
+              "rules": 7
+            }
+          },
+          "art": {},
+          "recents": [],
+          "addons": []
+        }
+      }
+    },
+    {
+      "file": "settings/scan-without-rules-stamp.json",
+      "why": "a cached verdict with no detection-generation stamp is dropped so it is rescanned",
+      "expect": {
+        "status": "loaded",
+        "settings": {
+          "schema": 2,
+          "theme": "system",
+          "lang": "en",
+          "groupGamesByStore": true,
+          "autoScanDrives": false,
+          "folders": [],
+          "excludedRoots": [],
+          "manual": [],
+          "hidden": [],
+          "posters": {},
+          "scans": {},
+          "art": {},
+          "recents": [],
+          "addons": []
+        }
+      }
+    },
+    {
+      "file": "settings/from-the-future.json",
+      "why": "settings written by a newer build are refused, and the file left untouched",
+      "expect": {
+        "status": "refused",
+        "code": "stateVersionAhead"
+      }
+    },
+    {
+      "file": "settings/not-json.json",
+      "why": "a truncated write",
+      "expect": {
+        "status": "quarantined",
+        "settings": {
+          "schema": 2,
+          "theme": "system",
+          "lang": "en",
+          "groupGamesByStore": true,
+          "autoScanDrives": false,
+          "folders": [],
+          "excludedRoots": [],
+          "manual": [],
+          "hidden": [],
+          "posters": {},
+          "scans": {},
+          "art": {},
+          "recents": [],
+          "addons": []
+        }
+      }
+    },
+    {
+      "file": "settings/json-array.json",
+      "why": "valid JSON that is not an object",
+      "expect": {
+        "status": "quarantined",
+        "settings": {
+          "schema": 2,
+          "theme": "system",
+          "lang": "en",
+          "groupGamesByStore": true,
+          "autoScanDrives": false,
+          "folders": [],
+          "excludedRoots": [],
+          "manual": [],
+          "hidden": [],
+          "posters": {},
+          "scans": {},
+          "art": {},
+          "recents": [],
+          "addons": []
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "theme": "dark",
+  "lang": "de",
+  "folders": [
+    "E:\\SteamLibrary"
+  ],
+  "hidden": [
+    "E:\\SteamLibrary\\Skyrim"
+  ],
+  "addon": "C:\\builds\\renodx-dlss.addon64",
+  "addonFiles": [
+    {
+      "path": "C:\\builds\\other.addon64",
+      "name": "Other"
+    }
+  ],
+  "posters": {
+    "abc123": "C:\\posters\\abc123.png"
+  }
+}

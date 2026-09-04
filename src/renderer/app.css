@@ -1,0 +1,468 @@
+/* Light is the base palette; dark and system are layered on top, so no colour
+   has its only definition inside a media query. */
+:root {
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --ink: #14171c;
+  --muted: #5c6572;
+  --line: #dfe3e8;
+  --accent: #2f6f4f;
+  --warn-bg: #fff4e5;
+  --warn-line: #e5a44a;
+  --warn-ink: #6b4310;
+  --titlebar: #eceef1;
+}
+
+:root[data-theme='dark'],
+:root[data-theme='system'] {
+  color-scheme: dark;
+  --bg: #0b0d10;
+  --panel: #14181d;
+  --ink: #e8ecf1;
+  --muted: #98a2b0;
+  --line: #242a32;
+  --accent: #6fd3a0;
+  --warn-bg: #2a1f0e;
+  --warn-line: #8a6420;
+  --warn-ink: #f0d9a8;
+  --titlebar: #0f1216;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --ink: #14171c;
+  --muted: #5c6572;
+  --line: #dfe3e8;
+  --accent: #2f6f4f;
+  --warn-bg: #fff4e5;
+  --warn-line: #e5a44a;
+  --warn-ink: #6b4310;
+  --titlebar: #eceef1;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme='system'] {
+    color-scheme: light;
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --ink: #14171c;
+    --muted: #5c6572;
+    --line: #dfe3e8;
+    --accent: #2f6f4f;
+    --warn-bg: #fff4e5;
+    --warn-line: #e5a44a;
+    --warn-ink: #6b4310;
+    --titlebar: #eceef1;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 0 0 14px;
+  background: var(--titlebar);
+  border-bottom: 1px solid var(--line);
+  /* The frame is removed, so the bar itself has to be the drag handle. */
+  -webkit-app-region: drag;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.mark {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.name {
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.version {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.controls {
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.controls button {
+  width: 44px;
+  height: 40px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.controls button:hover {
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+  color: var(--ink);
+}
+
+.controls button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+main {
+  display: grid;
+  gap: 14px;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 22px 18px 40px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+
+.card.warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+  color: var(--warn-ink);
+}
+
+h2 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+p {
+  margin: 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.warn-text {
+  color: var(--warn-line);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 16px;
+  margin: 14px 0 0;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.row:first-of-type {
+  border-top: 0;
+}
+
+select,
+input[type='checkbox'] {
+  accent-color: var(--accent);
+}
+
+select {
+  min-width: 180px;
+  padding: 5px 8px;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+select:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#save-state {
+  min-height: 1.4em;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+/* ---- scan results ---- */
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 6px;
+}
+
+.card-head h2 {
+  margin: 0;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+button.primary,
+.actions button {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.actions button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.mono {
+  margin-top: 10px;
+  color: var(--muted);
+  font-family: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+  font-size: 12px;
+  /* A long install path must not push the window wider. */
+  overflow-wrap: anywhere;
+}
+
+table {
+  width: 100%;
+  margin-top: 12px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+thead th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+}
+
+tbody th {
+  font-weight: 500;
+  /* Executable paths are the long column; let them wrap rather than scroll. */
+  overflow-wrap: anywhere;
+}
+
+tr.recommended {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.numeric {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.muted-badge {
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  color: var(--muted);
+}
+
+#scan-extra:not(:empty) {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---- runtime files ---- */
+
+#runtimes h3 {
+  margin: 16px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.runtime-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.runtime-list li {
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.runtime-list li:last-child {
+  border-bottom: 0;
+}
+
+.runtime-name {
+  font-family: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+
+.runtime-version {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- library ---- */
+
+.game-group + .game-group {
+  margin-top: 18px;
+}
+
+.game-group h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.game-grid {
+  display: grid;
+  /* Cards reflow rather than scrolling sideways at any window width. */
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.game-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.game-card:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.game-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.game-initials {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.game-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.game-name {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-source {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#library-status {
+  min-height: 1.4em;
+  margin-bottom: 10px;
+  font-size: 12px;
+}

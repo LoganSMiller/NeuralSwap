@@ -1,0 +1,18 @@
+{
+  "schema": 2,
+  "lang": "es",
+  "folders": [
+    "G:\\Games"
+  ],
+  "theme": "chartreuse",
+  "groupGamesByStore": "yes please",
+  "recents": "not an array",
+  "scans": {
+    "abc": {
+      "ok": true,
+      "rules": 7,
+      "scannedAt": 5
+    },
+    "bad": "nope"
+  }
+}

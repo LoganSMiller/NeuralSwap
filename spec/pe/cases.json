@@ -1,0 +1,112 @@
+{
+  "note": "Open each image and report bitness, machine, imports (lower-cased, normal plus delay-load) and which markers appear in the MAPPED SECTIONS. parses:false means the file must be refused as not-a-PE. bytesRead is informational, not a required value - but for marker-in-overlay-only it must stay far below the file size.",
+  "markers": [
+    "D3D12CreateDevice",
+    "D3D11CreateDevice",
+    "CreateDXGIFactory",
+    "Direct3DCreate9",
+    "vkCreateInstance",
+    "wglCreateContext"
+  ],
+  "cases": [
+    {
+      "file": "pe/x64-d3d12.pe.bin",
+      "why": "a 64-bit image importing d3d12",
+      "sizeBytes": 1024,
+      "expect": {
+        "parses": true,
+        "bitness": 64,
+        "machine": 34404,
+        "imports": [
+          "d3d12.dll",
+          "dxgi.dll",
+          "kernel32.dll"
+        ],
+        "markers": [],
+        "bytesRead": 1360
+      }
+    },
+    {
+      "file": "pe/x86-d3d11.pe.bin",
+      "why": "a 32-bit image, to pin the PE32 vs PE32+ distinction",
+      "sizeBytes": 1024,
+      "expect": {
+        "parses": true,
+        "bitness": 32,
+        "machine": 332,
+        "imports": [
+          "d3d11.dll",
+          "kernel32.dll"
+        ],
+        "markers": [],
+        "bytesRead": 1084
+      }
+    },
+    {
+      "file": "pe/x64-delay-d3d12.pe.bin",
+      "why": "a delay-bound d3d12 - invisible if only the normal import table is read",
+      "sizeBytes": 1024,
+      "expect": {
+        "parses": true,
+        "bitness": 64,
+        "machine": 34404,
+        "imports": [
+          "d3d12.dll",
+          "kernel32.dll"
+        ],
+        "markers": [],
+        "bytesRead": 1128
+      }
+    },
+    {
+      "file": "pe/no-imports.pe.bin",
+      "why": "an image with no import directory reports none rather than failing",
+      "sizeBytes": 1024,
+      "expect": {
+        "parses": true,
+        "bitness": 64,
+        "machine": 34404,
+        "imports": [],
+        "markers": [],
+        "bytesRead": 512
+      }
+    },
+    {
+      "file": "pe/marker-in-section.pe.bin",
+      "why": "a marker reachable only as a string, past the 1 MiB scan chunk boundary",
+      "sizeBytes": 3146240,
+      "expect": {
+        "parses": true,
+        "bitness": 64,
+        "machine": 34404,
+        "imports": [],
+        "markers": [
+          "D3D12CreateDevice",
+          "vkCreateInstance"
+        ],
+        "bytesRead": 3145728
+      }
+    },
+    {
+      "file": "pe/marker-in-overlay-only.pe.bin",
+      "why": "the marker sits in appended overlay data, which the loader can never resolve - it must NOT be found, and only the mapped sections may be read",
+      "sizeBytes": 66560,
+      "expect": {
+        "parses": true,
+        "bitness": 64,
+        "machine": 34404,
+        "imports": [],
+        "markers": [],
+        "bytesRead": 512
+      }
+    },
+    {
+      "file": "pe/dos-stub-only.pe.bin",
+      "why": "an MZ stub with no PE signature is a DOS binary, not a Windows image",
+      "sizeBytes": 1024,
+      "expect": {
+        "parses": false
+      }
+    }
+  ]
+}
