@@ -11,6 +11,9 @@
   --warn-bg: #fff4e5;
   --warn-line: #e5a44a;
   --warn-ink: #6b4310;
+  --bad-bg: #fdecec;
+  --bad-line: #d9534f;
+  --bad-ink: #7a1f1c;
   --titlebar: #eceef1;
 }
 
@@ -26,6 +29,9 @@
   --warn-bg: #2a1f0e;
   --warn-line: #8a6420;
   --warn-ink: #f0d9a8;
+  --bad-bg: #2b1414;
+  --bad-line: #a3453f;
+  --bad-ink: #f3c9c6;
   --titlebar: #0f1216;
 }
 
@@ -40,6 +46,9 @@
   --warn-bg: #fff4e5;
   --warn-line: #e5a44a;
   --warn-ink: #6b4310;
+  --bad-bg: #fdecec;
+  --bad-line: #d9534f;
+  --bad-ink: #7a1f1c;
   --titlebar: #eceef1;
 }
 
@@ -55,6 +64,9 @@
     --warn-bg: #fff4e5;
     --warn-line: #e5a44a;
     --warn-ink: #6b4310;
+    --bad-bg: #fdecec;
+    --bad-line: #d9534f;
+    --bad-ink: #7a1f1c;
     --titlebar: #eceef1;
   }
 }
@@ -464,5 +476,178 @@ tr.recommended {
 #library-status {
   min-height: 1.4em;
   margin-bottom: 10px;
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------- installing */
+
+.row-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.row-actions button {
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.row-actions button.primary {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+}
+
+.row-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+/* Disabled rather than hidden, so the action stays where the user found it. */
+.row-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.row-actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A plan can be wider than the window on a narrow one. The table scrolls
+   inside its own box rather than pushing the page sideways. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.plan-table {
+  min-width: 520px;
+}
+
+tr.muted-row th,
+tr.muted-row td {
+  color: var(--muted);
+}
+
+.callout {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  font-size: 13px;
+}
+
+/* The one state that needs a user to act: files changed and not put back. */
+.callout.danger {
+  border-color: var(--bad-line);
+  background: var(--bad-bg);
+  color: var(--bad-ink);
+}
+
+.warnings {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.warnings li {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  font-size: 13px;
+}
+
+.warning-files {
+  margin-top: 6px;
+  font-family: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.checks {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.check {
+  padding: 7px 10px;
+  border-left: 3px solid var(--line);
+  font-size: 13px;
+}
+
+.check + .check {
+  margin-top: 4px;
+}
+
+.check-pass {
+  border-left-color: var(--accent);
+}
+
+.check-warn {
+  border-left-color: var(--warn-line);
+}
+
+.check-fail {
+  border-left-color: var(--bad-line);
+}
+
+.check-outcome {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.check-fail .check-outcome {
+  color: var(--bad-line);
+}
+
+.check-detail {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.plain-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.plain-list li {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.plain-list li:last-child {
+  border-bottom: 0;
+}
+
+#install-status:not(:empty) {
+  margin-top: 16px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+#install-status h3 {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+#install-hint {
+  min-height: 1.4em;
   font-size: 12px;
 }

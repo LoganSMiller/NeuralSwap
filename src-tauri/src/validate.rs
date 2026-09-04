@@ -59,6 +59,52 @@ impl<'de> Deserialize<'de> for AbsolutePath {
     }
 }
 
+/// A relative directory inside a game folder - where an install writes.
+///
+/// The core refuses an unsafe relative path anyway, and does so against the
+/// filesystem where a junction is visible. This is the boundary's own check:
+/// the same principle as `AbsolutePath`, so a handler cannot be handed a shape
+/// nobody looked at. The empty string is valid and means the game folder
+/// itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelativeDir(String);
+
+impl RelativeDir {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn check(text: &str) -> Result<Self, String> {
+        if text.len() > 4_096 {
+            return Err("implausible path length".to_owned());
+        }
+        if text.contains('\0') {
+            return Err("NUL byte in path".to_owned());
+        }
+        // A colon is a drive letter or an alternate data stream; neither is a
+        // relative directory.
+        if text.contains(':') {
+            return Err("colon in relative path".to_owned());
+        }
+        if text.starts_with('/') || text.starts_with('\\') {
+            return Err("rooted or UNC path".to_owned());
+        }
+        for segment in text.split(['/', '\\']) {
+            if segment == ".." {
+                return Err("path escapes the game folder".to_owned());
+            }
+        }
+        Ok(Self(text.to_owned()))
+    }
+}
+
+impl<'de> Deserialize<'de> for RelativeDir {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::check(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Bounded free text. Anything reaching the DOM or a catalogue lookup has a
 /// length limit rather than being taken as arbitrary input.
 #[derive(Debug, Clone)]
@@ -100,6 +146,22 @@ mod tests {
 
     fn path(value: &str) -> Result<AbsolutePath, String> {
         AbsolutePath::check(value)
+    }
+
+    #[test]
+    fn relative_install_directories_are_checked_at_the_boundary_too() {
+        assert!(RelativeDir::check("bin/x64").is_ok());
+        assert!(RelativeDir::check("bin\\x64").is_ok());
+        // The game folder itself.
+        assert!(RelativeDir::check("").is_ok());
+
+        assert!(RelativeDir::check("../escape").is_err());
+        assert!(RelativeDir::check("bin/../../escape").is_err());
+        assert!(RelativeDir::check("/etc").is_err());
+        assert!(RelativeDir::check("\\\\server\\share").is_err());
+        assert!(RelativeDir::check("C:\\Windows").is_err());
+        assert!(RelativeDir::check("bin:stream").is_err());
+        assert!(RelativeDir::check("bin/\0x").is_err());
     }
 
     #[test]

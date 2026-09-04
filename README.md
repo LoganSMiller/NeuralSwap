@@ -12,11 +12,12 @@ the same problem and solves a lot of it well. This is a separate codebase, not
 a fork — see [ATTRIBUTION.md](ATTRIBUTION.md) for what it owes that project and
 for the third-party components the install routes orchestrate.
 
-**Status: the whole reference core is ported to Rust, library discovery and
-folder scanning work against real installs, and the install engine — plan,
-preflight, write-ahead journal, verification and restore — is built and
-tested.** What is not yet wired is the front end for it and the packages
-themselves: the engine is exercised by its tests rather than by a button.
+**Status: the whole reference core is ported to Rust; library discovery,
+folder scanning and the native DLL swap work end to end against real installs
+— plan, preflight, write-ahead journal, verification and restore, with a
+screen in front of them.** What is missing is the other two routes (ReShade +
+Feeder, OptiScaler) and any notion of where packages come from: you point it
+at a folder of runtime DLLs you already have.
 
 The section at the bottom says precisely what exists and what does not.
 Nothing here is claimed to work that has not been run.
@@ -34,16 +35,18 @@ src-tauri/
   crates/core/            host-agnostic core - no Tauri, no UI
     src/error.rs          stable machine codes
     src/bytes.rs          bounds-checked little-endian reads
+    src/hash.rs           content hashing - the only honest identity for a file
     src/fsx/              path safety, durable writes
     src/zip/              hardened archive extraction
     src/pe/               PE inspection and its cache
     src/jobs/             locks and cancellable parallel sweeps
     src/scan/             API detection, candidate ranking, folder walk
+    src/install/          plan, preflight, journal, manifest, apply, restore
     src/library/          Steam, Epic and Xbox discovery, and a VDF reader
     src/platform/         the few things that must ask Windows itself
     src/settings/         schema, migrations, sanitiser, store
     examples/             point the scanner or the library at a real machine
-    tests/                replays spec/, plus end-to-end scanning
+    tests/                replays spec/, plus end-to-end scanning and installing
 src/                      the TypeScript reference implementation (see below)
   renderer/               the frontend, which is shipped
 test/unit/                the reference implementation's tests
@@ -62,15 +65,20 @@ the TypeScript version, a lost escape in a character class reduced `[\\/]` to
 entirely. A hand-written test caught it in under a minute.
 
 A port cannot inherit those tests, so it inherits the vectors instead:
-`npm run vectors` writes 59 cases as JSON tables plus byte-identical binary
+`npm run vectors` writes 106 cases as JSON tables plus byte-identical binary
 fixtures, and `cargo test` replays them against the Rust core. "Did the port
 preserve the rules?" becomes a test run rather than a judgement call. CI fails
 if regenerating produces anything other than what is committed.
 
-Two of the ported modules had a real bug caught this way, both in the Rust
-code, both within seconds of first running the vectors — see below. Three more
-turned up when the scanner was first pointed at a real 70 GB game install,
-which is why there is an `examples/scan_dir.rs` for doing exactly that.
+The install planner and the journal-recovery decision were written this way
+round on purpose — reference first, vectors, then Rust — because they are the
+rules that govern somebody else's game folder. The 47 cases covering them are
+compared whole: a reason, a byte total or a warning that differs counts as a
+divergence even when the file list agrees, since those are the parts a user
+actually reads.
+
+[What building it twice caught](#what-building-it-twice-caught), at the bottom,
+is the list of defects this has actually found.
 
 ---
 
@@ -78,9 +86,12 @@ which is why there is an `examples/scan_dir.rs` for doing exactly that.
 
 ### Dependencies
 
-Zero production npm dependencies; the Rust tree is `serde`, `serde_json`,
-`flate2` (pure-Rust `miniz_oxide` backend) and `crc32fast`. `npm audit
---omit=dev` and `cargo audit` both run in CI.
+Zero production npm dependencies. The core crate's direct Rust dependencies
+are `serde`, `serde_json`, `flate2` (pure-Rust `miniz_oxide` backend),
+`crc32fast`, `memchr`, `sha2`, and on Windows `windows-registry` and
+`windows-sys`. All pure Rust bar the two Microsoft crates, so the build needs
+no native toolchain beyond the linker; `npm audit --omit=dev` and `cargo
+audit` both run in CI.
 
 Upstream has exactly one production dependency, `extract-zip@2.0.1`, which
 carries [GHSA-jmr9-qjv8-65gv][advisory] — unvalidated symlink path traversal —
@@ -101,15 +112,23 @@ Measured on this machine, release build:
 
 | | upstream (Electron 33) | NeuralSwap (Tauri 2) |
 | --- | --- | --- |
-| **Installer** | 230.8 MB | **1.1 MB** |
-| Application binary | — | 2.9 MB |
-| Frontend bundle | — | 9.0 kB |
+| **Installer** | 230.8 MB | **1.26 MB** |
+| Application binary | — | 3.29 MB |
+| Frontend bundle | — | 23.1 kB |
 | Memory, own process tree | — | 354 MB |
 
-The installer is the real win: **231x smaller**, because WebView2 is already
+The installer is the real win: **183x smaller**, because WebView2 is already
 part of Windows rather than a bundled copy of Chromium. The caveat is that the
 installer uses the download bootstrapper, so on a machine without WebView2 it
 fetches the runtime on first install — present by default on Windows 11.
+
+These numbers grew with the install engine, and it is worth being straight
+about the cost: the installer went from 1.1 MB to 1.26 MB and the binary from
+2.9 MB to 3.29 MB, which is what a SHA-256 implementation, the journal, the
+manifest and the restore path weigh. The frontend went from 9.0 kB to 23.1 kB,
+most of it the plan and preflight screens — a bigger proportional jump, and
+the right trade for a screen whose entire job is telling somebody what is
+about to happen to their game folder.
 
 The memory figure is deliberately not presented as a win. 354 MB is this app's
 own tree — one `neuralswap.exe` plus six WebView2 processes — measured by
@@ -369,7 +388,7 @@ game folder:
 
 ## What exists, and what does not
 
-Ported to Rust and passing the vectors — 187 Rust tests, 111 reference tests:
+Ported to Rust and passing the vectors — 206 Rust tests, 111 reference tests:
 
 - Path safety, including the symlink walk and the cross-platform rules.
 - Durable atomic writes with the Windows transient-replace retry.
@@ -428,12 +447,15 @@ where `memchr::memmem` takes milliseconds.
 
 ### Not built at all
 
-- **The routes themselves.** The engine above installs a set of files into a
-  folder; what it does not yet have is the knowledge of *which* files, for
-  ReShade + Feeder and for OptiScaler, or where to fetch them. The native DLL
-  swap is the one the engine currently expresses end to end.
-- **The front end for installing.** The engine is driven by its tests, not by
-  a button: no command boundary, no plan screen, no progress reporting.
+- **The other two routes.** The engine installs a set of files into a folder;
+  what it does not have is the knowledge of *which* files for ReShade + Feeder
+  and for OptiScaler, both of which need more than dropping DLLs beside an
+  executable. The native DLL swap is the route that works today.
+- **Any notion of where packages come from.** No catalogue, no download, no
+  signature check on what is fetched — you point it at a folder of runtime
+  DLLs you already have, and it reads, hashes and classifies what is there.
+- **Progress reporting during an install.** The window waits while it works.
+  Fine for a handful of DLLs; not fine for a route that unpacks an archive.
 - GOG discovery.
 - The remaining trust features: GPU, driver and conflicting-injector checks in
   preflight, and a redacted diagnostics bundle.

@@ -30,6 +30,7 @@
 pub mod apply;
 pub mod journal;
 pub mod manifest;
+pub mod package;
 pub mod plan;
 pub mod preflight;
 pub mod recover;
@@ -39,6 +40,7 @@ pub mod version;
 pub use apply::{apply, Applied, Outcome, Reached};
 pub use journal::{Journal, JournalRecord, JournalStep, RecoveryOutcome};
 pub use manifest::{FileStatus, InstallManifest, Integrity};
+pub use package::{read_package, read_present};
 pub use plan::{build_plan, Plan, PlanInput, Route, Step, StepAction, StepReason, Warning};
 pub use preflight::{preflight, Check, CheckName, CheckOutcome, Preflight};
 pub use recover::{decide_recovery, JournalState, Recovery, RecoveryDecision};

@@ -377,6 +377,29 @@ mod tests {
         }
     }
 
+    /// Read by the frontend, so the tagged shape is part of the contract.
+    /// `NothingInstalled` is a unit variant and serialises to the tag alone,
+    /// which is the case a consumer is most likely to get wrong.
+    #[test]
+    fn the_outcome_serialises_as_a_tagged_object() {
+        let nothing = serde_json::to_value(Outcome::NothingInstalled).expect("serialise");
+        assert_eq!(nothing["outcome"], "nothingInstalled");
+
+        let restored = serde_json::to_value(Outcome::Restored(Report {
+            files: vec![FileOutcome {
+                rel: "bin/x64/a.dll".to_owned(),
+                action: Action::RestoredOriginal,
+                detail: "310.1.0.0".to_owned(),
+                code: None,
+            }],
+            complete: true,
+        }))
+        .expect("serialise");
+        assert_eq!(restored["outcome"], "restored");
+        assert_eq!(restored["complete"], true);
+        assert_eq!(restored["files"][0]["action"], "restoredOriginal");
+    }
+
     #[test]
     fn nothing_installed_is_not_an_error() {
         let bench = bench();

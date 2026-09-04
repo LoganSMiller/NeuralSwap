@@ -3,10 +3,12 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
 mod commands;
+mod installer;
 mod scanner;
 mod validate;
 
 use commands::AppState;
+use installer::Installer;
 use neuralswap_core::settings::SettingsStore;
 use scanner::Scanner;
 use std::sync::Arc;
@@ -59,7 +61,34 @@ pub fn run() {
                 .join("scan-cache.json");
             let scanner = Arc::new(Scanner::load(cache_file));
 
-            app.manage(AppState { settings, scanner });
+            // Journals, backups and install records live beside the settings.
+            let data_dir = file
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            let installer = Arc::new(Installer::new(&data_dir));
+
+            // Before the window is usable. An install interrupted by a crash
+            // or a power cut leaves a half-changed game folder, and the user
+            // must not be invited to install on top of one - so this runs
+            // first and reports what it did.
+            for outcome in installer.recover_at_startup() {
+                log::warn!(
+                    "recovered install journal {}: {:?} ({}), {} restored, {} removed, {} failed",
+                    outcome.id,
+                    outcome.decision,
+                    outcome.reason,
+                    outcome.restored.len(),
+                    outcome.removed.len(),
+                    outcome.failures.len()
+                );
+            }
+
+            app.manage(AppState {
+                settings,
+                scanner,
+                installer,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -80,6 +109,12 @@ pub fn run() {
             commands::scan_folder,
             commands::scan_cancel,
             commands::scan_cache_info,
+            commands::install_plan,
+            commands::install_apply,
+            commands::install_cancel,
+            commands::install_status,
+            commands::install_restore_preview,
+            commands::install_restore,
             commands::shell_reveal_folder,
             commands::window_minimize,
             commands::window_toggle_maximize,

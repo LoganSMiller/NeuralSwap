@@ -66,9 +66,27 @@
             <h3>Upscaler runtime files in this folder</h3>
             <ul id="runtime-list" class="runtime-list"></ul>
           </div>
+          <div id="install-status"></div>
+          <div class="row-actions" id="scan-actions" hidden>
+            <button type="button" id="install-start" class="primary">
+              Install a runtime&hellip;
+            </button>
+            <button type="button" id="install-undo" hidden>Put it back&hellip;</button>
+          </div>
           <p class="muted" id="scan-extra"></p>
         </div>
         <p id="scan-empty" class="muted" hidden></p>
+      </section>
+
+      <section class="card" id="install-panel" hidden>
+        <div class="card-head">
+          <h2 id="install-title">Install</h2>
+          <div class="actions">
+            <button type="button" id="install-close">Close</button>
+          </div>
+        </div>
+        <p class="muted" id="install-hint" role="status"></p>
+        <div id="install-body"></div>
       </section>
 
       <section class="card">

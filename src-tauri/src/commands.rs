@@ -8,13 +8,15 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::{Manager, State, Window};
 
+use crate::installer::Installer;
 use crate::scanner::Scanner;
 
-use crate::validate::{AbsolutePath, LanguageTag};
+use crate::validate::{AbsolutePath, LanguageTag, RelativeDir};
 
 pub struct AppState {
     pub settings: SettingsStore,
     pub scanner: Arc<Scanner>,
+    pub installer: Arc<Installer>,
 }
 
 type Reply<T> = Result<T, Error>;
@@ -241,18 +243,40 @@ pub fn library_add_game(state: State<'_, AppState>, dir: AbsolutePath) -> Reply<
 /// Driven from Rust rather than through the JS dialog plugin, so the frontend
 /// is granted no capability that could open a file dialog on its own.
 #[tauri::command]
-pub async fn pick_folder(app: tauri::AppHandle) -> Reply<Option<String>> {
+pub async fn pick_folder(
+    app: tauri::AppHandle,
+    purpose: Option<PickPurpose>,
+) -> Reply<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
+    // An enum rather than a caller-supplied title: the dialog's text is not
+    // something the renderer needs to be able to set.
+    let title = purpose.unwrap_or(PickPurpose::Game).title();
     // The blocking picker must not run on the main thread.
     tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .file()
-            .set_title("Choose a game folder")
+            .set_title(title)
             .blocking_pick_folder()
             .map(|picked| picked.to_string())
     })
     .await
     .map_err(|error| Error::new(Code::BadRequest, format!("dialog failed: {error}")))
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PickPurpose {
+    Game,
+    Package,
+}
+
+impl PickPurpose {
+    const fn title(self) -> &'static str {
+        match self {
+            PickPurpose::Game => "Choose a game folder",
+            PickPurpose::Package => "Choose the folder holding the runtime DLLs",
+        }
+    }
 }
 
 /// Scan one folder for installable executables.
@@ -319,6 +343,192 @@ pub fn window_toggle_maximize(window: Window) -> Reply<()> {
 #[tauri::command]
 pub fn window_close(window: Window) -> Reply<()> {
     window.close().map_err(window_error)
+}
+
+// ------------------------------------------------------------------ install
+
+/// Prove the frontend is asking about a folder the user actually has in their
+/// library.
+///
+/// This is the gate on everything that writes. A path that merely passed
+/// `AbsolutePath` is a *shape* we are willing to reason about; it is not
+/// evidence that anybody chose it. Without this check, a compromised or buggy
+/// renderer could name any folder on the machine and have DLLs written into
+/// it, and the core would happily oblige because the path is well-formed.
+///
+/// Configured roots are checked first because it is a string comparison.
+/// Discovery is the fallback, because a Steam game lives under a library
+/// folder the user never had to add by hand - refusing those would mean
+/// refusing almost every game.
+fn assert_in_library(state: &State<'_, AppState>, dir: &std::path::Path) -> Reply<()> {
+    let settings = state.settings.get();
+    let configured = settings
+        .folders
+        .iter()
+        .chain(settings.manual.iter())
+        .any(|root| is_inside(dir, std::path::Path::new(root)));
+    if configured {
+        return Ok(());
+    }
+
+    // `hidden` is deliberately not consulted: hiding a game is a display
+    // preference, not a withdrawal of permission, and a hidden game the user
+    // has explicitly asked to install into is still their game.
+    let discovered = library::discover(&platform::roots())
+        .into_iter()
+        .any(|game| is_inside(dir, &game.dir));
+    if discovered {
+        return Ok(());
+    }
+
+    Err(Error::new(
+        Code::UnsafePath,
+        format!(
+            "{} is not a game in the library - add its folder first",
+            dir.display()
+        ),
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanReply {
+    pub plan: neuralswap_core::install::Plan,
+    /// The checks, run against this plan. Returned with the plan rather than
+    /// on demand, so the one screen a user reads has everything on it.
+    pub preflight: neuralswap_core::install::Preflight,
+    /// Whether an install or restore is already running for this game.
+    pub busy: bool,
+}
+
+/// Derive a plan and run the checks. Writes nothing.
+#[tauri::command]
+pub async fn install_plan(
+    state: State<'_, AppState>,
+    game_dir: AbsolutePath,
+    install_dir: RelativeDir,
+    package_dir: AbsolutePath,
+) -> Reply<PlanReply> {
+    assert_in_library(&state, game_dir.as_path())?;
+    let installer = Arc::clone(&state.installer);
+    let game = game_dir.into_inner();
+    let package = package_dir.into_inner();
+    let rel = install_dir.as_str().to_owned();
+
+    // Hashing a package and the files it would replace is disk-bound, so it
+    // goes to a blocking thread rather than stalling the UI thread.
+    blocking(move || {
+        let plan = installer.plan(&game, &rel, &package)?;
+        let preflight = installer.preflight(&game, &plan, &package);
+        Ok(PlanReply {
+            busy: installer.is_busy(&game),
+            plan,
+            preflight,
+        })
+    })
+    .await
+}
+
+/// Install. The plan is rebuilt here rather than accepted from the frontend.
+///
+/// That is the important part: a plan is a decision about what to overwrite,
+/// and taking one from the renderer would mean trusting it to say which files
+/// to replace. Rebuilding costs one more pass over a handful of DLLs and means
+/// the only thing crossing the boundary is *which game and which package*.
+/// If the folder has changed since the user looked, the rebuilt plan describes
+/// the change and `apply` refuses a stale one anyway.
+#[tauri::command]
+pub async fn install_apply(
+    state: State<'_, AppState>,
+    game_dir: AbsolutePath,
+    install_dir: RelativeDir,
+    package_dir: AbsolutePath,
+) -> Reply<neuralswap_core::install::Outcome> {
+    assert_in_library(&state, game_dir.as_path())?;
+    let installer = Arc::clone(&state.installer);
+    let game = game_dir.into_inner();
+    let package = package_dir.into_inner();
+    let rel = install_dir.as_str().to_owned();
+
+    blocking(move || {
+        let plan = installer.plan(&game, &rel, &package)?;
+        log::info!(
+            "installing into {}: {} change(s), {} to write",
+            game.display(),
+            plan.changes,
+            plan.write_bytes
+        );
+        let outcome = installer.apply(&game, &plan, &package)?;
+        log::info!("install outcome: {outcome:?}");
+        Ok(outcome)
+    })
+    .await
+}
+
+/// Ask a running install to stop. It rolls back what it has already written.
+#[tauri::command]
+pub fn install_cancel(state: State<'_, AppState>) -> Reply<()> {
+    state.installer.cancel();
+    Ok(())
+}
+
+/// What we installed in this game, and whether it is still what we wrote.
+#[tauri::command]
+pub async fn install_status(
+    state: State<'_, AppState>,
+    game_dir: AbsolutePath,
+) -> Reply<Option<neuralswap_core::install::Integrity>> {
+    assert_in_library(&state, game_dir.as_path())?;
+    let installer = Arc::clone(&state.installer);
+    let game = game_dir.into_inner();
+    blocking(move || installer.status(&game)).await
+}
+
+/// What a restore would do, without doing it.
+#[tauri::command]
+pub async fn install_restore_preview(
+    state: State<'_, AppState>,
+    game_dir: AbsolutePath,
+) -> Reply<neuralswap_core::install::restore::Outcome> {
+    assert_in_library(&state, game_dir.as_path())?;
+    let installer = Arc::clone(&state.installer);
+    let game = game_dir.into_inner();
+    blocking(move || installer.restore_preview(&game)).await
+}
+
+/// Put the game back the way it was.
+#[tauri::command]
+pub async fn install_restore(
+    state: State<'_, AppState>,
+    game_dir: AbsolutePath,
+) -> Reply<neuralswap_core::install::restore::Outcome> {
+    assert_in_library(&state, game_dir.as_path())?;
+    let installer = Arc::clone(&state.installer);
+    let game = game_dir.into_inner();
+    blocking(move || {
+        let outcome = installer.restore(&game)?;
+        log::info!("restore outcome for {}: {outcome:?}", game.display());
+        Ok(outcome)
+    })
+    .await
+}
+
+/// Run a closure on the blocking pool and flatten the join error.
+///
+/// A panic in a blocking task would otherwise surface as a join failure with
+/// no code attached, which the frontend has no way to display.
+async fn blocking<T, F>(work: F) -> Reply<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Reply<T> + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) => Err(Error::new(
+            Code::BadRequest,
+            format!("the operation did not finish: {error}"),
+        )),
+    }
 }
 
 /// Flush any queued settings write before the window goes away, rather than

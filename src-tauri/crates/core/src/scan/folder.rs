@@ -188,7 +188,9 @@ fn parent_key(rel: &str) -> String {
     }
 }
 
-fn classify_runtime(file_name: &str) -> Option<RuntimeKind> {
+/// Public because the install side classifies the same names, and having two
+/// lists of what counts as a runtime file is how they come to disagree.
+pub fn classify_runtime(file_name: &str) -> Option<RuntimeKind> {
     let lower = file_name.to_lowercase();
     if !lower.ends_with(".dll") {
         return None;

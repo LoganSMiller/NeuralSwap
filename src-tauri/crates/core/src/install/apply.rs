@@ -515,6 +515,43 @@ mod tests {
         }
     }
 
+    /// The frontend reads these shapes, so the tag-plus-flattened-fields
+    /// layout that `#[serde(tag = "outcome")]` produces is part of the
+    /// contract rather than an implementation detail. An internally tagged
+    /// enum silently fails on a newtype variant wrapping a non-map, so this
+    /// also proves the three variants stay map-shaped.
+    #[test]
+    fn the_outcome_serialises_as_a_tagged_object() {
+        let installed = serde_json::to_value(Outcome::Installed(Applied {
+            journal_id: "j1".to_owned(),
+            installed: vec!["bin/x64/a.dll".to_owned()],
+            skipped: Vec::new(),
+            bytes_written: 12,
+        }))
+        .expect("serialise");
+        assert_eq!(installed["outcome"], "installed");
+        assert_eq!(installed["journalId"], "j1");
+        assert_eq!(installed["bytesWritten"], 12);
+
+        let failed = serde_json::to_value(Outcome::Failed(Failure {
+            code: "planStale".to_owned(),
+            message: "changed underneath".to_owned(),
+            reached: Reached::NothingWritten,
+            rollback_failures: Vec::new(),
+        }))
+        .expect("serialise");
+        assert_eq!(failed["outcome"], "failed");
+        assert_eq!(failed["reached"], "nothingWritten");
+
+        let refused = serde_json::to_value(Outcome::Refused(Preflight {
+            checks: Vec::new(),
+            ok: false,
+        }))
+        .expect("serialise");
+        assert_eq!(refused["outcome"], "refused");
+        assert_eq!(refused["ok"], false);
+    }
+
     #[test]
     fn a_fresh_install_writes_the_file_and_records_it() {
         let bench = bench();

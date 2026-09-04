@@ -1,7 +1,24 @@
 import { byId, call, codeOf } from './bridge.ts';
+import {
+  renderOutcome,
+  renderPlan,
+  renderRestore,
+  renderStatus,
+} from './install-view.ts';
 import { gameCard, groupGames, loadGames, scanGame, type Game } from './library.ts';
 import { clearScan, renderScan } from './scan-view.ts';
-import type { BootInfo, CacheInfo, FolderScan, Health, LoadStatus, Settings } from './types.ts';
+import type {
+  BootInfo,
+  CacheInfo,
+  FolderScan,
+  Health,
+  Integrity,
+  InstallOutcome,
+  LoadStatus,
+  PlanReply,
+  RestoreOutcome,
+  Settings,
+} from './types.ts';
 
 /**
  * Views build DOM nodes and set textContent. Nothing here assembles markup
@@ -110,7 +127,12 @@ async function refreshLibrary(): Promise<void> {
 async function openGame(game: Game): Promise<void> {
   if (scanning) return;
   scanning = true;
+  selected = game;
+  installDir = '';
+  byId('install-panel').hidden = true;
   clearScan();
+  byId('install-status').replaceChildren();
+  byId('scan-actions').hidden = true;
   byId('scan-title').textContent = game.name;
   byId('scan-panel').hidden = false;
   byId('scan-hint').textContent = 'Reading executable headers…';
@@ -119,7 +141,10 @@ async function openGame(game: Game): Promise<void> {
   try {
     const scan = await scanGame(game);
     renderScan(scan);
+    installDir = directoryOfChosen(scan);
     byId('scan-hint').textContent = 'Nothing was written.';
+    byId('scan-actions').hidden = scan.chosen === null;
+    await refreshInstallStatus(game);
   } catch (error) {
     const empty = byId('scan-empty');
     empty.textContent = error instanceof Error ? error.message : 'The scan failed.';
@@ -128,6 +153,187 @@ async function openGame(game: Game): Promise<void> {
   } finally {
     scanning = false;
     await refreshCacheFact();
+  }
+}
+
+// ---------------------------------------------------------------- installing
+
+/** The game and install directory the install panel is acting on. */
+let selected: Game | null = null;
+let installDir = '';
+let installing = false;
+
+/**
+ * Where the runtime has to go: beside the executable that loads it.
+ *
+ * Taken from the candidate the scanner recommended rather than guessed, and
+ * the empty string when that executable sits in the game folder itself.
+ */
+function directoryOfChosen(scan: FolderScan): string {
+  if (scan.chosen === null) return '';
+  const rel = scan.candidates[scan.chosen]?.rel ?? '';
+  const cut = Math.max(rel.lastIndexOf('/'), rel.lastIndexOf('\\'));
+  return cut < 0 ? '' : rel.slice(0, cut);
+}
+
+async function refreshInstallStatus(game: Game): Promise<void> {
+  try {
+    const status = await call<Integrity | null>('install_status', { gameDir: game.dir });
+    // Only rendered when there is something to say. An empty panel on a game
+    // nobody has touched is noise.
+    if (status !== null) renderStatus(byId('install-status'), status);
+    byId('install-undo').hidden = status === null;
+  } catch {
+    // A status read failing is not worth interrupting the scan result for;
+    // the install itself reports its own problems.
+    byId('install-undo').hidden = true;
+  }
+}
+
+function showInstallPanel(title: string, hint: string): HTMLElement {
+  byId('install-title').textContent = title;
+  byId('install-hint').textContent = hint;
+  const panel = byId('install-panel');
+  panel.hidden = false;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  return byId('install-body');
+}
+
+/** Pick a package folder, then show what installing it would do. */
+async function startInstall(): Promise<void> {
+  const game = selected;
+  if (game === null || installing) return;
+
+  const packageDir = await call<string | null>('pick_folder', { purpose: 'package' });
+  if (!packageDir) return;
+
+  const body = showInstallPanel(game.name, 'Reading the package…');
+  body.replaceChildren();
+
+  try {
+    const reply = await call<PlanReply>('install_plan', {
+      gameDir: game.dir,
+      installDir,
+      packageDir,
+    });
+    byId('install-hint').textContent = 'Nothing has been written yet.';
+    renderPlan(body, reply, {
+      onInstall: () => void runInstall(game, packageDir),
+      onCancel: () => {
+        byId('install-panel').hidden = true;
+      },
+    });
+  } catch (error) {
+    byId('install-hint').textContent = '';
+    body.replaceChildren();
+    const message = document.createElement('p');
+    message.className = 'callout';
+    message.textContent =
+      error instanceof Error ? error.message : 'The package could not be read.';
+    body.append(message);
+  }
+}
+
+async function runInstall(game: Game, packageDir: string): Promise<void> {
+  if (installing) return;
+  installing = true;
+  const body = showInstallPanel(game.name, 'Installing…');
+  body.replaceChildren();
+
+  try {
+    const outcome = await call<InstallOutcome>('install_apply', {
+      gameDir: game.dir,
+      installDir,
+      packageDir,
+    });
+    byId('install-hint').textContent = '';
+    renderOutcome(body, outcome);
+  } catch (error) {
+    byId('install-hint').textContent = '';
+    const message = document.createElement('p');
+    message.className = 'callout danger';
+    message.textContent =
+      codeOf(error) === 'jobBusy'
+        ? 'Something is already running for this game. Wait for it to finish.'
+        : error instanceof Error
+          ? error.message
+          : 'The install failed.';
+    body.append(message);
+  } finally {
+    installing = false;
+    await refreshInstallStatus(game);
+  }
+}
+
+/**
+ * Show what undoing would do, and only then offer to do it.
+ *
+ * The preview is not a formality: it is where a user learns that one file will
+ * be left alone because a game update has since replaced it.
+ */
+async function startRestore(): Promise<void> {
+  const game = selected;
+  if (game === null || installing) return;
+
+  const body = showInstallPanel(game.name, 'Checking what can be put back…');
+  body.replaceChildren();
+
+  try {
+    const preview = await call<RestoreOutcome>('install_restore_preview', {
+      gameDir: game.dir,
+    });
+    byId('install-hint').textContent = 'Nothing has been changed yet.';
+    renderRestore(body, preview);
+
+    if (preview.outcome === 'nothingInstalled') return;
+
+    const actions = document.createElement('div');
+    actions.className = 'row-actions';
+
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = 'primary';
+    confirm.textContent = 'Put it back';
+    confirm.addEventListener('click', () => void runRestore(game));
+
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Leave it alone';
+    cancel.addEventListener('click', () => {
+      byId('install-panel').hidden = true;
+    });
+
+    actions.append(confirm, cancel);
+    body.append(actions);
+  } catch (error) {
+    byId('install-hint').textContent = '';
+    const message = document.createElement('p');
+    message.className = 'callout';
+    message.textContent =
+      error instanceof Error ? error.message : 'Could not read the install record.';
+    body.append(message);
+  }
+}
+
+async function runRestore(game: Game): Promise<void> {
+  if (installing) return;
+  installing = true;
+  const body = showInstallPanel(game.name, 'Putting files back…');
+  body.replaceChildren();
+
+  try {
+    const outcome = await call<RestoreOutcome>('install_restore', { gameDir: game.dir });
+    byId('install-hint').textContent = '';
+    renderRestore(body, outcome);
+  } catch (error) {
+    byId('install-hint').textContent = '';
+    const message = document.createElement('p');
+    message.className = 'callout danger';
+    message.textContent = error instanceof Error ? error.message : 'The restore failed.';
+    body.append(message);
+  } finally {
+    installing = false;
+    await refreshInstallStatus(game);
   }
 }
 
@@ -221,7 +427,17 @@ async function main(): Promise<void> {
   });
   byId('scan-close').addEventListener('click', () => {
     byId('scan-panel').hidden = true;
+    byId('install-panel').hidden = true;
     void call('scan_cancel');
+  });
+
+  byId('install-start').addEventListener('click', () => void startInstall());
+  byId('install-undo').addEventListener('click', () => void startRestore());
+  byId('install-close').addEventListener('click', () => {
+    byId('install-panel').hidden = true;
+    // An install that is running is asked to stop; it rolls back what it has
+    // written rather than leaving the folder half-changed.
+    if (installing) void call('install_cancel');
   });
 
   byId('minimize').addEventListener('click', () => void call('window_minimize'));
