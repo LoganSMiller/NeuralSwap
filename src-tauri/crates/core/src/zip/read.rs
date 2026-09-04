@@ -13,6 +13,10 @@ const LOCAL_SIG: u32 = 0x0403_4b50;
 const EOCD_MIN: usize = 22;
 const MAX_COMMENT: usize = 0xffff;
 
+/// How many end-of-central-directory candidates to consider. Bounded so a
+/// file stuffed with the signature cannot turn the search into the attack.
+const MAX_EOCD_CANDIDATES: usize = 8;
+
 /// Unix file-type mask and the symlink type, as stored in `st_mode`.
 const S_IFMT: u16 = 0xf000;
 const S_IFLNK: u16 = 0xa000;
@@ -88,9 +92,16 @@ fn read_chunk(file: &mut File, length: usize, position: u64) -> Result<Vec<u8>> 
     Ok(buffer)
 }
 
-/// Locate the End Of Central Directory record by scanning backwards: its
-/// position is not fixed, because a ZIP may carry a comment of up to 64 KiB.
-fn find_eocd(file: &mut File, size: u64) -> Result<(Vec<u8>, u64)> {
+/// Every position that looks like an End Of Central Directory record, newest
+/// first.
+///
+/// The position is not fixed: a ZIP may carry a comment of up to 64 KiB, and
+/// the four signature bytes can also occur by chance inside compressed data.
+/// Rather than pick a winner here on a positional rule, every candidate is
+/// returned and [`read_directory_location`] accepts the first whose *contents*
+/// lead to a real central directory. Structural validation is a stronger test
+/// than any arithmetic on the comment length.
+fn find_eocd_candidates(file: &mut File, size: u64) -> Result<Vec<(Vec<u8>, u64)>> {
     let window = std::cmp::min(size, (EOCD_MIN + MAX_COMMENT) as u64);
     let start = size - window;
     let tail = read_chunk(file, usize::try_from(window).unwrap_or(0), start)?;
@@ -98,30 +109,73 @@ fn find_eocd(file: &mut File, size: u64) -> Result<(Vec<u8>, u64)> {
         return fail(Code::ZipInvalid, "file is shorter than an EOCD record");
     }
 
+    let mut found = Vec::new();
     for index in (0..=tail.len() - EOCD_MIN).rev() {
         if tail.zu32(index)? != EOCD_SIG {
             continue;
         }
-        let comment_length = usize::from(tail.zu16(index + 20)?);
-        // The comment length must account for exactly the remaining bytes,
-        // which is what distinguishes a real EOCD from those four bytes
-        // happening to appear inside compressed data.
-        if index + EOCD_MIN + comment_length == tail.len() {
-            let record = tail.get(index..).unwrap_or(&[]).to_vec();
-            return Ok((record, start + index as u64));
+        found.push((
+            tail.get(index..).unwrap_or(&[]).to_vec(),
+            start + index as u64,
+        ));
+        // A handful is plenty. Without a cap, a file engineered to contain
+        // thousands of these would make this loop the attack.
+        if found.len() >= MAX_EOCD_CANDIDATES {
+            break;
         }
     }
-    fail(Code::ZipInvalid, "no end-of-central-directory record")
+    if found.is_empty() {
+        return fail(Code::ZipInvalid, "no end-of-central-directory record");
+    }
+    Ok(found)
 }
 
 struct Directory {
     entry_count: u64,
+    /// Absolute position of the central directory in this file, already
+    /// corrected for any prefix.
     central_offset: u64,
     central_size: u64,
+    /// Bytes sitting in front of the ZIP itself.
+    ///
+    /// A self-extracting installer is an executable with an archive appended,
+    /// and its central directory records local-header offsets relative to the
+    /// start of the *archive* rather than the start of the file. ReShade ships
+    /// exactly like this. Adding this to each entry's offset is what makes
+    /// such a file readable instead of a parse error.
+    prefix: u64,
+}
+
+/// Confirm a central directory really begins at `offset`.
+fn looks_like_central_directory(file: &mut File, offset: u64, entry_count: u64) -> bool {
+    // An archive with no entries has no first header to check, so the only
+    // available evidence is that the directory is empty and sits where the
+    // record says. Anything else must show the signature.
+    if entry_count == 0 {
+        return true;
+    }
+    read_chunk(file, 4, offset)
+        .ok()
+        .filter(|head| head.len() == 4)
+        .and_then(|head| head.zu32(0).ok())
+        .is_some_and(|signature| signature == CENTRAL_SIG)
 }
 
 fn read_directory_location(file: &mut File, size: u64) -> Result<Directory> {
-    let (eocd, eocd_offset) = find_eocd(file, size)?;
+    let candidates = find_eocd_candidates(file, size)?;
+    let mut last_error = None;
+
+    for (eocd, eocd_offset) in candidates {
+        match directory_from(file, size, &eocd, eocd_offset) {
+            Ok(directory) => return Ok(directory),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| crate::Error::new(Code::ZipInvalid, "no usable central directory")))
+}
+
+fn directory_from(file: &mut File, size: u64, eocd: &[u8], eocd_offset: u64) -> Result<Directory> {
     let mut entry_count = u64::from(eocd.zu16(10)?);
     let mut central_size = u64::from(eocd.zu32(12)?);
     let mut central_offset = u64::from(eocd.zu32(16)?);
@@ -143,13 +197,42 @@ fn read_directory_location(file: &mut File, size: u64) -> Result<Directory> {
         }
     }
 
-    if central_offset.saturating_add(central_size) > size {
+    if central_size > size || central_offset > size {
         return fail(Code::ZipInvalid, "central directory lies outside the file");
+    }
+
+    // Where the directory sits if the archive starts at byte zero.
+    if central_offset.saturating_add(central_size) <= size
+        && looks_like_central_directory(file, central_offset, entry_count)
+    {
+        return Ok(Directory {
+            entry_count,
+            central_offset,
+            central_size,
+            prefix: 0,
+        });
+    }
+
+    // Otherwise the archive is preceded by something else. The directory ends
+    // where the EOCD begins, so its real start is a subtraction - and the gap
+    // between that and the declared offset is the size of the prefix.
+    let actual = eocd_offset
+        .checked_sub(central_size)
+        .ok_or_else(|| crate::Error::new(Code::ZipInvalid, "central directory before the file"))?;
+    let prefix = actual.checked_sub(central_offset).ok_or_else(|| {
+        crate::Error::new(Code::ZipInvalid, "central directory offset overshoots")
+    })?;
+    if !looks_like_central_directory(file, actual, entry_count) {
+        return fail(
+            Code::ZipInvalid,
+            "no central directory where the record says",
+        );
     }
     Ok(Directory {
         entry_count,
-        central_offset,
+        central_offset: actual,
         central_size,
+        prefix,
     })
 }
 
@@ -249,10 +332,19 @@ pub fn read_entries(file: &mut File, size: u64) -> Result<Vec<ZipEntry>> {
             local_header_offset: u64::from(central.zu32(offset + 42)?),
             unix_mode,
         };
+        // Relative to the start of the archive, which is not the start of the
+        // file when something is prepended. Applied before the Zip64 extra
         let extra = central
             .get(name_end..name_end + extra_length)
             .unwrap_or(&[]);
         apply_zip64_extra(&mut entry, extra)?;
+
+        // After the Zip64 block, never before it. That block detects an
+        // overflowed offset by comparing against the 0xffffffff sentinel, and
+        // a prefix added first would no longer equal the sentinel - so a
+        // Zip64 entry inside a self-extracting archive would silently keep a
+        // bogus offset instead of the real one.
+        entry.local_header_offset = entry.local_header_offset.saturating_add(location.prefix);
 
         entries.push(entry);
         offset = name_end + extra_length + comment_length;
