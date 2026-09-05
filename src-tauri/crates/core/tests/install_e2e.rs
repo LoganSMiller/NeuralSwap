@@ -201,6 +201,7 @@ fn a_real_runtime_swap_installs_verifies_and_restores() {
     let undone = restore::restore(&restore::Request {
         game_dir: &bench.game,
         manifest_root: &bench.manifests,
+        layers: &neuralswap_core::install::layer::NoRegistry,
         cancel: &cancel,
     })
     .expect("restore");
@@ -275,6 +276,7 @@ fn a_patch_over_our_install_is_detected_and_not_reverted() {
     let undone = restore::restore(&restore::Request {
         game_dir: &bench.game,
         manifest_root: &bench.manifests,
+        layers: &neuralswap_core::install::layer::NoRegistry,
         cancel: &cancel,
     })
     .expect("restore");

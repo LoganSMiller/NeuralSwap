@@ -77,6 +77,16 @@ pub struct InstallManifest {
     /// one.
     #[serde(default)]
     pub created_dirs: Vec<String>,
+    /// Changes this install made outside the game folder.
+    ///
+    /// Carried here as well as in the journal for the same reason
+    /// `created_dirs` is: the two undo paths are different. The journal rolls
+    /// back an install that failed; this undoes one that succeeded, possibly
+    /// months later. A manifest that lists only files can only put files back,
+    /// and a Vulkan layer registered for a game would then outlive every trace
+    /// of why it exists.
+    #[serde(default)]
+    pub effects: Vec<crate::install::journal::Effect>,
 }
 
 impl InstallManifest {
@@ -243,6 +253,7 @@ mod tests {
             installed_at: 1_700_000_000,
             files,
             created_dirs: Vec::new(),
+            effects: Vec::new(),
         }
     }
 

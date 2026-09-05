@@ -170,6 +170,7 @@ impl Installer {
         restore::preview(&restore::Request {
             game_dir,
             manifest_root: &self.manifest_root,
+            layers: self.layers.as_ref(),
             cancel: &Cancel::new(),
         })
     }
@@ -190,6 +191,7 @@ impl Installer {
         restore::restore(&restore::Request {
             game_dir,
             manifest_root: &self.manifest_root,
+            layers: self.layers.as_ref(),
             cancel: &cancel,
         })
     }

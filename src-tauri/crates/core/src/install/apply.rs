@@ -217,6 +217,10 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
     // written - so both undo paths know what to remove.
     let created_dirs = dirs_to_create(request.game_dir, &resolved);
 
+    // No route produces one yet. When the Vulkan layer delivery lands here it
+    // fills this, and both undo paths already know what to do with it.
+    let effects: Vec<journal::Effect> = Vec::new();
+
     // Intent first. After this line a crash is recoverable; before it, there
     // is nothing to recover because nothing has been touched.
     let record = JournalRecord {
@@ -239,10 +243,7 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
             })
             .collect(),
         created_dirs: created_dirs.clone(),
-        // No route produces one yet. When the Vulkan layer delivery lands
-        // here it fills this, and the rollback below already knows what to
-        // do with it.
-        effects: Vec::new(),
+        effects: effects.clone(),
     };
     let mut journal = Journal::begin(request.journal_root, record)?;
 
@@ -254,7 +255,7 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
             // than no manifest, because it is what an uninstall trusts.
             manifest::save(
                 request.manifest_root,
-                &built_manifest(request, &resolved, created_dirs.clone()),
+                &built_manifest(request, &resolved, created_dirs.clone(), effects.clone()),
             )?;
             journal.remove()?;
             Ok(Outcome::Installed(Applied {
@@ -441,9 +442,11 @@ fn built_manifest(
     request: &Request<'_>,
     resolved: &[Resolved<'_>],
     created_dirs: Vec<String>,
+    effects: Vec<journal::Effect>,
 ) -> InstallManifest {
     InstallManifest {
         created_dirs,
+        effects,
         version: manifest::MANIFEST_VERSION,
         game_dir: request.game_dir.to_path_buf(),
         route: request.plan.route,
@@ -888,6 +891,7 @@ mod tests {
         let undone = crate::install::restore::restore(&crate::install::restore::Request {
             game_dir: &bench.game,
             manifest_root: &bench.manifests,
+            layers: &crate::install::layer::NoRegistry,
             cancel: &Cancel::new(),
         })
         .expect("restore");

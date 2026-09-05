@@ -37,6 +37,11 @@ use crate::jobs::Cancel;
 pub struct Request<'a> {
     pub game_dir: &'a Path,
     pub manifest_root: &'a Path,
+    /// Needed to undo anything this install changed outside the game folder.
+    ///
+    /// Passed in rather than constructed, so a test cannot reach the real
+    /// registry and alter a developer's own Vulkan setup.
+    pub layers: &'a dyn crate::install::layer::LayerRegistry,
     pub cancel: &'a Cancel,
 }
 
@@ -132,7 +137,7 @@ pub fn restore(request: &Request<'_>) -> Result<Outcome> {
         file.action == Action::Failed || file.code.as_deref() == Some(Code::JobCancelled.as_str())
     });
     if !outstanding {
-        cleanup(&record, request.manifest_root)?;
+        cleanup(&record, request.manifest_root, request.layers)?;
     }
 
     Ok(Outcome::Restored(Report {
@@ -259,7 +264,37 @@ fn put_back(record: &InstallManifest, file: &ManifestFile) -> Result<()> {
 /// Backups first: a manifest with no backups is recoverable (there is nothing
 /// left to restore, which is the truth), whereas backups with no manifest are
 /// orphaned bytes nothing will ever clean up.
-fn cleanup(record: &InstallManifest, manifest_root: &Path) -> Result<()> {
+fn cleanup(
+    record: &InstallManifest,
+    manifest_root: &Path,
+    layers: &dyn crate::install::layer::LayerRegistry,
+) -> Result<()> {
+    // Anything changed outside the game folder, first.
+    //
+    // The files are back and the folders are gone; a Vulkan layer registered
+    // for this game would otherwise outlive every trace of why it exists.
+    // Reference counted, so this only deregisters when no other game still
+    // wants it - undoing one game must never break another.
+    //
+    // A failure here does not hold up the restore. The user's files are the
+    // point, they are already back, and a registry value that could not be
+    // removed is a smaller problem than a manifest kept forever because of it.
+    for effect in &record.effects {
+        match effect {
+            crate::install::journal::Effect::VulkanLayer {
+                shared_dir,
+                manifest,
+            } => {
+                let _ = crate::install::layer::deregister(
+                    layers,
+                    shared_dir,
+                    manifest,
+                    &record.game_dir,
+                );
+            }
+        }
+    }
+
     for file in &record.files {
         if let Some(original) = file.replaced.as_ref() {
             let _ = std::fs::remove_file(&original.backup);
@@ -289,6 +324,132 @@ fn cleanup(record: &InstallManifest, manifest_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::install::layer::LayerRegistry;
+
+    /// In memory, so no test can reach the real registry.
+    #[derive(Default)]
+    struct FakeRegistry {
+        values: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl LayerRegistry for FakeRegistry {
+        fn values(&self) -> Result<Vec<String>> {
+            Ok(self
+                .values
+                .lock()
+                .map(|held| held.clone())
+                .unwrap_or_default())
+        }
+        fn add(&self, value: &str) -> Result<()> {
+            if let Ok(mut held) = self.values.lock() {
+                held.push(value.to_owned());
+            }
+            Ok(())
+        }
+        fn remove(&self, value: &str) -> Result<()> {
+            if let Ok(mut held) = self.values.lock() {
+                held.retain(|item| item != value);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn undoing_a_committed_install_deregisters_its_vulkan_layer() {
+        // The gap this closes. The journal undoes an install that *failed*;
+        // this undoes one that *succeeded*, possibly months later. A manifest
+        // that listed only files could only put files back, and a layer
+        // registered for a game would outlive every trace of why it exists.
+        let root = tempfile::tempdir().expect("tempdir");
+        let game = root.path().join("game");
+        let manifests = root.path().join("installs");
+        let shared = root.path().join("vulkan-layer");
+        std::fs::create_dir_all(&game).expect("game dir");
+
+        let registry = FakeRegistry::default();
+        crate::install::layer::register(&registry, &shared, "ReShade64.json", &game)
+            .expect("register");
+        assert_eq!(registry.values().expect("values").len(), 1);
+
+        // A committed install that touched no files but did register a layer.
+        let record = InstallManifest {
+            version: manifest::MANIFEST_VERSION,
+            game_dir: game.clone(),
+            route: crate::install::plan::Route::NativeDll,
+            installed_at: 0,
+            files: Vec::new(),
+            created_dirs: Vec::new(),
+            effects: vec![crate::install::journal::Effect::VulkanLayer {
+                shared_dir: shared.clone(),
+                manifest: "ReShade64.json".to_owned(),
+            }],
+        };
+        manifest::save(&manifests, &record).expect("save");
+
+        let undone = restore(&Request {
+            game_dir: &game,
+            manifest_root: &manifests,
+            layers: &registry,
+            cancel: &Cancel::new(),
+        })
+        .expect("restore");
+
+        assert!(
+            matches!(undone, Outcome::Restored(ref report) if report.complete),
+            "{undone:?}"
+        );
+        assert!(
+            registry.values().expect("values").is_empty(),
+            "the layer must be deregistered by the undo"
+        );
+    }
+
+    #[test]
+    fn a_layer_another_game_still_wants_survives_this_ones_undo() {
+        // Reference counted, so undoing one game must not break another.
+        // Stated here as well as in `layer`, because this is the path a user
+        // actually takes.
+        let root = tempfile::tempdir().expect("tempdir");
+        let game = root.path().join("game");
+        let other = root.path().join("other");
+        let manifests = root.path().join("installs");
+        let shared = root.path().join("vulkan-layer");
+        std::fs::create_dir_all(&game).expect("game dir");
+
+        let registry = FakeRegistry::default();
+        for dir in [&game, &other] {
+            crate::install::layer::register(&registry, &shared, "ReShade64.json", dir)
+                .expect("register");
+        }
+
+        let record = InstallManifest {
+            version: manifest::MANIFEST_VERSION,
+            game_dir: game.clone(),
+            route: crate::install::plan::Route::NativeDll,
+            installed_at: 0,
+            files: Vec::new(),
+            created_dirs: Vec::new(),
+            effects: vec![crate::install::journal::Effect::VulkanLayer {
+                shared_dir: shared.clone(),
+                manifest: "ReShade64.json".to_owned(),
+            }],
+        };
+        manifest::save(&manifests, &record).expect("save");
+
+        restore(&Request {
+            game_dir: &game,
+            manifest_root: &manifests,
+            layers: &registry,
+            cancel: &Cancel::new(),
+        })
+        .expect("restore");
+
+        assert_eq!(
+            registry.values().expect("values").len(),
+            1,
+            "the other game still wants it"
+        );
+    }
     use crate::install::apply::{self, Applied};
     use crate::install::plan::{build_plan, PackageFile, Plan, PlanInput, PresentFile, Route};
     use crate::scan::folder::RuntimeKind;
@@ -376,6 +537,7 @@ mod tests {
             Request {
                 game_dir: &self.game,
                 manifest_root: &self.manifests,
+                layers: &crate::install::layer::NoRegistry,
                 cancel: &self.cancel,
             }
         }
@@ -576,6 +738,7 @@ mod tests {
         let resumed = Request {
             game_dir: &bench.game,
             manifest_root: &bench.manifests,
+            layers: &crate::install::layer::NoRegistry,
             cancel: &Cancel::new(),
         };
         match restore(&resumed).expect("restore") {
