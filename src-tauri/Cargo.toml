@@ -68,6 +68,11 @@ reqwest = { version = "0.13", default-features = false, features = [
     "native-tls",
 ] }
 
+# Registering a Vulkan implicit layer under HKCU. Already in the graph via the
+# core, which reads the registry for adapter and store discovery.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
 [dev-dependencies]
 tempfile = "3"
 

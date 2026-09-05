@@ -6,6 +6,7 @@ mod commands;
 mod components;
 mod fetch;
 mod installer;
+mod registry;
 mod scanner;
 mod validate;
 

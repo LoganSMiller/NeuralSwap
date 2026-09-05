@@ -3,10 +3,12 @@ use std::sync::Mutex;
 
 use neuralswap_core::error::{Code, Error, Result};
 use neuralswap_core::install::{
-    apply, journal, manifest, package, plan, preflight, restore, Integrity, Plan,
+    apply, journal, layer, manifest, package, plan, preflight, restore, Integrity, Plan,
 };
 use neuralswap_core::jobs::{Cancel, KeyedLock};
 use neuralswap_core::platform::gpu::Generation;
+
+use crate::registry::WindowsRegistry;
 
 /// Owns the three on-disk stores an install needs, and the locks around them.
 ///
@@ -24,6 +26,12 @@ pub struct Installer {
     /// mistake to report, not a request to serialise.
     locks: KeyedLock,
     cancel: Mutex<Cancel>,
+    #[allow(dead_code)]
+    /// Held rather than constructed at each call, so a test can supply one
+    /// that lives in memory. Registering a Vulkan layer changes machine-wide
+    /// state, and a test suite that could reach the real registry would be
+    /// able to alter a developer's own Vulkan setup by accident.
+    layers: Box<dyn layer::LayerRegistry + Send + Sync>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -41,12 +49,20 @@ fn key_of(game_dir: &Path) -> String {
 
 impl Installer {
     pub fn new(data_dir: &Path) -> Self {
+        Self::with_registry(data_dir, Box::new(WindowsRegistry))
+    }
+
+    pub fn with_registry(
+        data_dir: &Path,
+        layers: Box<dyn layer::LayerRegistry + Send + Sync>,
+    ) -> Self {
         Self {
             journal_root: data_dir.join("journal"),
             backup_root: data_dir.join("backups"),
             manifest_root: data_dir.join("installs"),
             locks: KeyedLock::new(),
             cancel: Mutex::new(Cancel::new()),
+            layers,
         }
     }
 
@@ -178,6 +194,51 @@ impl Installer {
         })
     }
 
+    // The Vulkan layer half, exercised by the tests below but not yet reached
+    // from a command. `apply` will call it once the layer delivery lands
+    // there; until then this is scaffolding, and saying so is better than
+    // inventing a command to make the lint quiet.
+    #[allow(dead_code)]
+    /// Where the Vulkan layer's files live.
+    ///
+    /// One directory for the whole machine, deliberately not inside any game.
+    /// A registered implicit layer is named by the absolute path of its
+    /// manifest and applies to every Vulkan application on the account, so
+    /// keeping a copy per game would mean several registrations all doing the
+    /// same job and no clear answer to which one to remove.
+    fn layer_dir(&self) -> PathBuf {
+        self.backup_root
+            .parent()
+            .unwrap_or(&self.backup_root)
+            .join("vulkan-layer")
+    }
+
+    /// Register the Vulkan layer on this account, counting `game_dir` as
+    /// wanting it.
+    ///
+    /// Machine-wide. Every Vulkan application on this account is affected, and
+    /// the caller is expected to have said so before getting here - see
+    /// [`neuralswap_core::install::placement::Delivery::VulkanLayer`].
+    #[allow(dead_code)]
+    pub fn register_vulkan_layer(
+        &self,
+        game_dir: &Path,
+        manifest: &str,
+    ) -> Result<layer::Registered> {
+        layer::register(self.layers.as_ref(), &self.layer_dir(), manifest, game_dir)
+    }
+
+    /// Stop counting `game_dir`, and deregister the layer if nothing else
+    /// wants it.
+    #[allow(dead_code)]
+    pub fn deregister_vulkan_layer(
+        &self,
+        game_dir: &Path,
+        manifest: &str,
+    ) -> Result<layer::Deregistered> {
+        layer::deregister(self.layers.as_ref(), &self.layer_dir(), manifest, game_dir)
+    }
+
     /// Ask the running install to stop at the next file boundary. It will roll
     /// back what it has done.
     pub fn cancel(&self) {
@@ -203,6 +264,76 @@ mod tests {
             key_of(Path::new("D:\\Games\\One")),
             key_of(Path::new("D:\\Games\\Two"))
         );
+    }
+
+    /// A registry that lives in memory. No test may reach the real one:
+    /// registering a Vulkan layer is machine-wide state, and a suite that
+    /// could write it would be able to change a developer's own setup.
+    #[derive(Default)]
+    struct FakeRegistry {
+        values: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl layer::LayerRegistry for FakeRegistry {
+        fn values(&self) -> Result<Vec<String>> {
+            Ok(lock(&self.values).clone())
+        }
+        fn add(&self, value: &str) -> Result<()> {
+            lock(&self.values).push(value.to_owned());
+            Ok(())
+        }
+        fn remove(&self, value: &str) -> Result<()> {
+            lock(&self.values).retain(|item| item != value);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_vulkan_layer_lives_outside_every_game() {
+        // A registered implicit layer is named by its manifest's absolute
+        // path and applies to every Vulkan application on the account. One
+        // copy per game would mean several registrations doing the same job
+        // and no clear answer to which to remove.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let installer = Installer::new(dir.path());
+        let layer_dir = installer.layer_dir();
+
+        assert!(layer_dir.ends_with("vulkan-layer"));
+        assert!(
+            !layer_dir.starts_with(&installer.backup_root),
+            "the layer must not live inside the backup store"
+        );
+    }
+
+    #[test]
+    fn two_games_share_one_layer_registration() {
+        // The round trip that matters: undoing the first game must leave the
+        // second working. Nothing here touches the real registry.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let installer = Installer::with_registry(dir.path(), Box::new(FakeRegistry::default()));
+        let one = Path::new("D:/Games/One");
+        let two = Path::new("D:/Games/Two");
+
+        assert!(matches!(
+            installer.register_vulkan_layer(one, "ReShade64.json"),
+            Ok(layer::Registered::Added { first: true, .. })
+        ));
+        assert!(matches!(
+            installer.register_vulkan_layer(two, "ReShade64.json"),
+            Ok(layer::Registered::AlreadyOurs { games: 2, .. })
+        ));
+
+        assert!(
+            matches!(
+                installer.deregister_vulkan_layer(one, "ReShade64.json"),
+                Ok(layer::Deregistered::StillWanted { games: 1, .. })
+            ),
+            "the second game still wants it"
+        );
+        assert!(matches!(
+            installer.deregister_vulkan_layer(two, "ReShade64.json"),
+            Ok(layer::Deregistered::Removed { .. })
+        ));
     }
 
     #[test]
