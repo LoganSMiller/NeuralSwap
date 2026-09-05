@@ -1,0 +1,32 @@
+{
+  "note": "Every ErrorCode, in declaration order. The Rust `Code` enum must produce exactly this set through `as_str()`, and the TypeScript `ErrorCode` union must contain exactly these members. A code in one and not the other is the bug this file exists to catch.",
+  "codes": [
+    "unsafePath",
+    "reservedName",
+    "symlinkRefused",
+    "outsideRoot",
+    "stateCorrupt",
+    "stateUnwritable",
+    "stateVersionAhead",
+    "jobBusy",
+    "jobCancelled",
+    "zipInvalid",
+    "zipUnsupported",
+    "zipTooLarge",
+    "zipEntryUnsafe",
+    "zipChecksum",
+    "peUnreadable",
+    "hardwareUnsupported",
+    "badRequest",
+    "networkFailed",
+    "downloadRejected",
+    "sourceNotFetchable",
+    "packageInvalid",
+    "journalCorrupt",
+    "targetLocked",
+    "targetProtected",
+    "insufficientSpace",
+    "verifyFailed",
+    "planStale"
+  ]
+}

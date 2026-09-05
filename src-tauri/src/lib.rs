@@ -3,11 +3,14 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
 mod commands;
+mod components;
+mod fetch;
 mod installer;
 mod scanner;
 mod validate;
 
 use commands::AppState;
+use components::Components;
 use installer::Installer;
 use neuralswap_core::settings::SettingsStore;
 use scanner::Scanner;
@@ -68,6 +71,19 @@ pub fn run() {
                 .to_path_buf();
             let installer = Arc::new(Installer::new(&data_dir));
 
+            // The component catalogue validates itself here. A licence rule it
+            // breaks is a bug in this build rather than anything a user did,
+            // so it is reported loudly and the application carries on without
+            // the ability to fetch - which is better than either pretending or
+            // refusing to start.
+            let components = match Components::new(&data_dir) {
+                Ok(components) => Some(Arc::new(components)),
+                Err(error) => {
+                    log::error!("the component catalogue is unusable: {error}");
+                    None
+                }
+            };
+
             // Before the window is usable. An install interrupted by a crash
             // or a power cut leaves a half-changed game folder, and the user
             // must not be invited to install on top of one - so this runs
@@ -88,6 +104,7 @@ pub fn run() {
                 settings,
                 scanner,
                 installer,
+                components,
             });
             Ok(())
         })
@@ -109,6 +126,8 @@ pub fn run() {
             commands::scan_folder,
             commands::scan_cancel,
             commands::scan_cache_info,
+            commands::component_list,
+            commands::component_ensure,
             commands::install_plan,
             commands::install_apply,
             commands::install_cancel,

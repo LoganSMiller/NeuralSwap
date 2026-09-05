@@ -1,5 +1,8 @@
+use neuralswap_core::components::catalog::{Role, Source, Trust};
+use neuralswap_core::components::store::{Freshness, Outcome};
 use neuralswap_core::error::{Code, Error};
 use neuralswap_core::fsx::paths::is_inside;
+use neuralswap_core::jobs::Cancel;
 use neuralswap_core::library::{self, Game};
 use neuralswap_core::platform;
 use neuralswap_core::scan::FolderScan;
@@ -8,6 +11,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::{Manager, State, Window};
 
+use crate::components::Components;
 use crate::installer::Installer;
 use crate::scanner::Scanner;
 
@@ -17,9 +21,36 @@ pub struct AppState {
     pub settings: SettingsStore,
     pub scanner: Arc<Scanner>,
     pub installer: Arc<Installer>,
+    /// `None` when the shipped catalogue failed its own validation, which is a
+    /// bug in the build. Every command that needs it says so rather than
+    /// panicking, so the rest of the application still works.
+    pub components: Option<Arc<Components>>,
 }
 
 type Reply<T> = Result<T, Error>;
+
+/// One row of the component picker.
+///
+/// A projection rather than the catalogue entry itself: the entry carries the
+/// licence text and the source URLs, which the UI has no business rendering
+/// and which would change the shape of this reply every time the catalogue
+/// gained a field.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentSummary {
+    pub id: String,
+    pub name: String,
+    pub summary: String,
+    pub role: Role,
+    pub homepage: String,
+    pub trust: Trust,
+    /// False for the things a user has to obtain themselves. The UI shows
+    /// those with instructions rather than a download button.
+    pub fetchable: bool,
+    pub busy: bool,
+    pub requires: Vec<String>,
+    pub conflicts_with: Vec<String>,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -463,6 +494,78 @@ pub async fn install_apply(
         Ok(outcome)
     })
     .await
+}
+
+/// Everything the catalogue knows about, for the component picker.
+///
+/// Reads no network and touches no disk: it is the compiled-in catalogue, so
+/// the picker can be shown instantly and offline. Whether any given component
+/// is *cached* is a separate question, asked when one is chosen.
+#[tauri::command]
+pub fn component_list(state: State<'_, AppState>) -> Reply<Vec<ComponentSummary>> {
+    let components = need_components(&state)?;
+    Ok(components
+        .catalog()
+        .components
+        .values()
+        .map(|component| ComponentSummary {
+            id: component.id.clone(),
+            name: component.name.clone(),
+            summary: component.summary.clone(),
+            role: component.role,
+            homepage: component.homepage.clone(),
+            trust: component.source.trust(),
+            fetchable: !matches!(
+                component.source,
+                Source::LocalOnly { .. } | Source::UserObtained { .. }
+            ),
+            busy: components.is_busy(&component.id),
+            requires: component.requires.clone(),
+            conflicts_with: component.conflicts_with.clone(),
+        })
+        .collect())
+}
+
+/// Make a component available, downloading it if it is not already cached.
+///
+/// The outcome is deliberately not a boolean. A component can be ready, can be
+/// something the user has to fetch by hand, or can have changed upstream since
+/// it was last recorded - and the third needs a decision from the user rather
+/// than a retry.
+#[tauri::command]
+pub async fn component_ensure(
+    state: State<'_, AppState>,
+    id: String,
+    recheck: bool,
+) -> Reply<Outcome> {
+    let components = Arc::clone(need_components(&state)?);
+    let freshness = if recheck {
+        Freshness::Recheck
+    } else {
+        Freshness::UseCache
+    };
+
+    blocking(move || {
+        let cancel = Cancel::new();
+        // Progress is dropped for now: wiring it to the window needs an event
+        // channel, and a download that reports nothing is better than a
+        // command that does not exist. The callback is threaded through the
+        // core precisely so this can be filled in without touching it.
+        let quiet: &neuralswap_core::components::store::Progress<'_> = &|_, _| {};
+        let outcome = components.ensure(&id, &cancel, freshness, quiet)?;
+        log::info!("component {id}: {outcome:?}");
+        Ok(outcome)
+    })
+    .await
+}
+
+fn need_components<'a>(state: &'a State<'_, AppState>) -> Reply<&'a Arc<Components>> {
+    state.components.as_ref().ok_or_else(|| {
+        Error::new(
+            Code::StateCorrupt,
+            "the component catalogue failed validation in this build",
+        )
+    })
 }
 
 /// Ask a running install to stop. It rolls back what it has already written.

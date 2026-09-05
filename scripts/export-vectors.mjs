@@ -30,7 +30,7 @@ import { SCHEMA_VERSION } from '../src/main/state/schema.ts';
 import { buildPlan } from '../src/core/install/plan.ts';
 import { decideRecovery } from '../src/core/install/recover.ts';
 import { relate } from '../src/core/install/version.ts';
-import { AppError } from '../src/shared/errors.ts';
+import { AppError, ERROR_CODES } from '../src/shared/errors.ts';
 import { buildZip } from '../test/fixtures/zipbuild.ts';
 import { buildPe } from '../test/fixtures/pebuild.ts';
 
@@ -105,6 +105,21 @@ writeJson('paths.json', {
     why,
     expect: outcome(() => assertSafeRelative(rel, PATH_ROOT))
   }))
+});
+
+// ------------------------------------------------------------------ errors
+
+// Every error code the UI knows how to translate.
+//
+// This exists because the two lists drifted: `hardwareUnsupported` was a Rust
+// code with no entry in `ErrorCode`, so a user could be shown a raw machine
+// string instead of a sentence. Neither side can be the authority on its own -
+// one adds a code, the other never hears about it - so the set is written down
+// and both are held to it.
+writeJson('errors.json', {
+  note:
+    'Every ErrorCode, in declaration order. The Rust `Code` enum must produce exactly this set through `as_str()`, and the TypeScript `ErrorCode` union must contain exactly these members. A code in one and not the other is the bug this file exists to catch.',
+  codes: ERROR_CODES
 });
 
 // ------------------------------------------------------------------ zip

@@ -39,6 +39,40 @@ fn outcome<T>(result: neuralswap_core::Result<T>) -> String {
 }
 
 #[test]
+fn error_codes_match_the_typescript_union() {
+    // The two lists drifted once already: `hardwareUnsupported` was a Rust
+    // code with no member in `ErrorCode`, so the UI could be handed a code it
+    // had no sentence for and would show the raw string to a user. Neither
+    // side can police this alone - each one only knows what it declares - so
+    // both are held to the vector.
+    let table = read_table("errors.json");
+    let expected: Vec<String> = table["codes"]
+        .as_array()
+        .expect("codes")
+        .iter()
+        .map(|code| code.as_str().expect("a string code").to_owned())
+        .collect();
+
+    let ours: Vec<String> = neuralswap_core::error::Code::ALL
+        .iter()
+        .map(|code| code.as_str().to_owned())
+        .collect();
+
+    // Order too, not just membership: the lists are grouped by when a failure
+    // can reach a user, and that grouping is the reason the comments in both
+    // files make sense.
+    assert_eq!(ours, expected);
+
+    // And no duplicates on our side, which `assert_eq` on a list would not
+    // catch if the vector happened to carry the same mistake.
+    let mut sorted = ours.clone();
+    sorted.sort();
+    let before = sorted.len();
+    sorted.dedup();
+    assert_eq!(sorted.len(), before, "a code is listed twice");
+}
+
+#[test]
 fn path_vectors_match() {
     let table = read_table("paths.json");
     let root = table["root"].as_str().expect("root");

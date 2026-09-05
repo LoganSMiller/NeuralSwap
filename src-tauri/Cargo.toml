@@ -52,6 +52,21 @@ tauri-plugin-dialog = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
+# Fetching components. Already in the graph via Tauri, so naming it directly
+# adds no new crate for the HTTP side.
+#
+# `native-tls` rather than rustls, deliberately: it uses Windows' own schannel
+# and therefore the machine's trust store and proxy configuration. A bundled
+# root store fails on exactly the managed corporate machines where a user is
+# least able to do anything about it.
+#
+# `blocking` because `store::Fetcher` is a synchronous trait, and the app
+# already runs disk-bound work on a blocking thread. JSON is parsed with
+# `serde_json` directly rather than enabling reqwest's `json` feature.
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "native-tls",
+] }
 
 [dev-dependencies]
 tempfile = "3"

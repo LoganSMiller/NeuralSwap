@@ -24,6 +24,18 @@ pub enum Code {
     PeUnreadable,
     HardwareUnsupported,
     BadRequest,
+    // Fetching a component. Separated from the install codes because none of
+    // these has touched a game folder: a download that fails leaves nothing
+    // behind, and the UI should offer "try again" rather than explain a state.
+    /// Could not reach the server at all - DNS, connection, TLS, timeout.
+    NetworkFailed,
+    /// The server answered, and the answer was refused: an error status, a
+    /// redirect away from HTTPS, a body larger than the cap, a truncated
+    /// stream.
+    DownloadRejected,
+    /// The component is not something that can be fetched - it is bundled,
+    /// already on the machine, or only published somewhere with no URL.
+    SourceNotFetchable,
     // Install-time failures. These are the codes that can reach a user while
     // something is being written into a game folder, so each one has to say
     // enough for the UI to explain what state the folder is in.
@@ -37,6 +49,43 @@ pub enum Code {
 }
 
 impl Code {
+    /// Every code, so the set can be compared against the TypeScript union
+    /// rather than trusted to stay in step.
+    ///
+    /// It did not stay in step: `hardwareUnsupported` existed here for some
+    /// time with no counterpart in `ErrorCode`, which meant the UI could
+    /// receive a code it had no translation for and show a user the raw
+    /// string. `spec/errors.json` now pins the two together.
+    pub const ALL: [Code; 27] = [
+        Code::UnsafePath,
+        Code::ReservedName,
+        Code::SymlinkRefused,
+        Code::OutsideRoot,
+        Code::StateCorrupt,
+        Code::StateUnwritable,
+        Code::StateVersionAhead,
+        Code::JobBusy,
+        Code::JobCancelled,
+        Code::ZipInvalid,
+        Code::ZipUnsupported,
+        Code::ZipTooLarge,
+        Code::ZipEntryUnsafe,
+        Code::ZipChecksum,
+        Code::PeUnreadable,
+        Code::HardwareUnsupported,
+        Code::BadRequest,
+        Code::NetworkFailed,
+        Code::DownloadRejected,
+        Code::SourceNotFetchable,
+        Code::PackageInvalid,
+        Code::JournalCorrupt,
+        Code::TargetLocked,
+        Code::TargetProtected,
+        Code::InsufficientSpace,
+        Code::VerifyFailed,
+        Code::PlanStale,
+    ];
+
     /// The wire form. Must match the TypeScript `ErrorCode` union exactly.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -57,6 +106,9 @@ impl Code {
             Code::PeUnreadable => "peUnreadable",
             Code::HardwareUnsupported => "hardwareUnsupported",
             Code::BadRequest => "badRequest",
+            Code::NetworkFailed => "networkFailed",
+            Code::DownloadRejected => "downloadRejected",
+            Code::SourceNotFetchable => "sourceNotFetchable",
             Code::PackageInvalid => "packageInvalid",
             Code::JournalCorrupt => "journalCorrupt",
             Code::TargetLocked => "targetLocked",
