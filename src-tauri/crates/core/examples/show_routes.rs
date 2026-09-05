@@ -66,7 +66,17 @@ fn main() {
                     == exe_dir
         });
 
-        let found = assess(&imports, has_native_dlss);
+        // Modules shipped in the executable's own directory. Streamline can be
+        // loaded at runtime rather than linked, in which case the import table
+        // never names it and only the file on disk gives it away.
+        let beside: Vec<String> = std::fs::read_dir(exe.parent().unwrap_or(&game.dir))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_lowercase())
+            .collect();
+
+        let found = assess(&imports, &beside, has_native_dlss);
         println!("\n{}", game.name);
         println!("  executable : {}", candidate.rel);
         println!("  integration: {:?}", found.integration);

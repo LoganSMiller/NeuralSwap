@@ -232,6 +232,51 @@ generation wrapper separately.
 
 ---
 
+## 5.1 The plugin manifests are the ground truth
+
+Every Streamline plugin embeds a JSON manifest naming its feature id, the
+graphics APIs it supports, and the plugins it depends on. These are readable
+straight out of the shipping DLLs, and they settle several questions that the
+public SDK headers get asked to answer and cannot.
+
+| plugin | id | rhi | requires |
+|---|---|---|---|
+| `sl.common` | -1 | d3d11, d3d12, vk | — |
+| `sl.dlss` | 0 | d3d11, d3d12, vk | `sl.common` |
+| `sl.nis` | 2 | d3d11, d3d12, vk | `sl.common` |
+| `sl.reflex` | 3 | d3d11, d3d12, vk | `sl.common` |
+| `sl.pcl` | 4 | d3d11, d3d12, vk | `sl.common` |
+| `sl.dlss_g` | 1000 | **d3d12, vk** | `sl.common`, **`sl.reflex`** |
+| `sl.dlss_d` | 1001 | d3d11, d3d12, vk | `sl.common` |
+| `sl.dlss_nr` | **1004** | **d3d12, vk** | `sl.common` |
+
+Four things follow.
+
+**Neural rendering is a real Streamline feature.** It is id 1004, shipped as
+`sl.dlss_nr` from 2.13. The public SDK on GitHub is **2.12**, which has no
+neural-rendering entry anywhere — no feature id, no `sl_dlss_nr.h`. Reading
+only the public SDK leads to the conclusion that no game can ask for neural
+rendering at all. That conclusion is wrong, and this project held it until the
+manifests were read. A game built against 2.13 requests it like anything else.
+
+**But almost no game ships it yet.** Cyberpunk 2077, a flagship DLSS title,
+ships `sl.dlss`, `sl.dlss_d` and `sl.dlss_g` beside its executable and *not*
+`sl.dlss_nr`. So it feeds everything neural rendering consumes while never
+asking for it. That is a fact about the game, not the feature — which is why
+the check belongs on the file list rather than in a hard-coded rule.
+
+**Frame generation's dependency on Reflex is structural.** `sl.dlss_g` lists
+`sl.reflex` in `required_plugins`. This is the binary confirming what the
+programming guide says in prose, and it is why frame generation is out of reach
+on any route that cannot participate in the Reflex protocol.
+
+**Only frame generation and neural rendering refuse D3D11.** Ray reconstruction
+accepts `d3d11` — reasoning by analogy from the other 1000-series features says
+otherwise, and is wrong. This is the constraint the bridge route exists for.
+
+The manifests are extracted with a search for `"namespace"` in the DLL, then a
+scan back to the enclosing `{`. They are plain UTF-8, uncompressed.
+
 ## 6. Detecting which route a game needs
 
 Streamline is integrated by **replacing** the graphics libraries: an integrated
@@ -279,6 +324,36 @@ else in this codebase: uncertainty is stated rather than rounded to a confident
 answer. The route is the same either way — Feeder works regardless — but the
 sentence shown to the user says "we cannot tell from the file" instead of
 asserting the game has no DLSS.
+
+### 6.1 The dumpbin check is scoped, and reading it as universal is a bug
+
+The quoted correctness check above is introduced by the guide with "if you are
+integrating Streamline by replacing the standard libraries with
+`sl.interposer.lib`". It validates *one* of the two supported integration
+styles. The other is **manual hooking**, and the guide is explicit:
+
+> keep linking the standard libraries, load `sl.interposer.dll` dynamically and
+> redirect DXGI/D3D API calls as required
+
+> If you are using Vulkan, instead of `vulkan-1.dll` dynamically load
+> `sl.interposer.dll`
+
+A game integrated that way imports `d3d12.dll` or `vulkan-1.dll`, never names
+anything `sl.*`, and has a complete Streamline integration. On imports alone it
+is indistinguishable from a game with no plumbing at all — and it would be
+routed to an expensive bridge that manufactures inputs it already produces. For
+Vulkan this is the style NVIDIA *recommends*, so it is not a corner case.
+
+What settles it is that `sl.interposer.dll` and `sl.common.dll` are mandatory
+redistributables that "need to be distributed with your application", installed
+next to the host executable. Whatever the linkage, the interposer is on disk.
+
+So the rule is asymmetric, and deliberately so:
+
+- **Imports lead** for DLSS runtimes. `nvngx_*.dll` files get left behind by old
+  game versions and copied in by hand, so presence proves nothing about use.
+- **Disk is decisive for Streamline.** Nothing but an integration puts
+  `sl.interposer.dll` in a game folder.
 
 ---
 

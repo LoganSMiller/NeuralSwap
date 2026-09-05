@@ -139,6 +139,66 @@ impl Feature {
         !matches!(self, Feature::NeuralRendering)
     }
 
+    /// The Streamline plugin that implements this feature, and its feature id.
+    ///
+    /// Read out of the plugins' own embedded JSON manifests, in the shipping
+    /// Streamline 2.13 binaries rather than from a header:
+    ///
+    /// ```text
+    /// plugin          id     rhi                    requires
+    /// sl.common       -1     d3d11, d3d12, vk       -
+    /// sl.dlss          0     d3d11, d3d12, vk       sl.common
+    /// sl.nis           2     d3d11, d3d12, vk       sl.common
+    /// sl.reflex        3     d3d11, d3d12, vk       sl.common
+    /// sl.pcl           4     d3d11, d3d12, vk       sl.common
+    /// sl.dlss_g     1000     d3d12, vk              sl.common, sl.reflex
+    /// sl.dlss_d     1001     d3d11, d3d12, vk       sl.common
+    /// sl.dlss_nr    1004     d3d12, vk              sl.common
+    /// ```
+    ///
+    /// Every row was read from a shipping binary: `sl.dlss_d` from a game's
+    /// own install, the rest from the 2.13 package. The two that matter are
+    /// the two that are *narrower* than the others.
+    ///
+    /// # A correction
+    ///
+    /// An earlier version of this module claimed neural rendering was not
+    /// something a game could integrate at all, on the grounds that the public
+    /// SDK's feature enumeration has no entry for it. That enumeration is real,
+    /// but the public SDK is **2.12**, and neural rendering arrived in 2.13 as
+    /// `sl.dlss_nr`, feature id 1004. A game built against 2.13 can request it
+    /// like any other feature.
+    ///
+    /// What remains true is the practical situation: 2.13 is new, so a game
+    /// that ships it is currently the exception. That is a fact about a
+    /// particular game, though, not a property of the feature - so it is
+    /// answered by looking at which plugins the game actually ships, which is
+    /// what [`Feature::fed_by_game`] does.
+    pub const fn streamline_plugin(self) -> (&'static str, i32) {
+        match self {
+            Feature::SuperResolution => ("sl.dlss.dll", 0),
+            Feature::RayReconstruction => ("sl.dlss_d.dll", 1001),
+            Feature::FrameGeneration => ("sl.dlss_g.dll", 1000),
+            Feature::NeuralRendering => ("sl.dlss_nr.dll", 1004),
+        }
+    }
+
+    /// Whether the feature refuses to run on Direct3D 11.
+    ///
+    /// From the `rhi` list in each plugin manifest above. Only `sl.dlss_g` and
+    /// `sl.dlss_nr` are restricted to `d3d12` and `vk`; everything else,
+    /// including ray reconstruction, accepts `d3d11`. So on a DX11 game frame
+    /// generation and neural rendering cannot be reached through Streamline
+    /// however the files are arranged - which is the reason the bridge route
+    /// exists, rather than a preference for it.
+    ///
+    /// Ray reconstruction was assumed to be restricted here too, by analogy,
+    /// until its manifest was read. The manifests are the source; the analogy
+    /// was wrong.
+    pub const fn requires_modern_rhi(self) -> bool {
+        matches!(self, Feature::FrameGeneration | Feature::NeuralRendering)
+    }
+
     /// The oldest architecture that can run this feature at all.
     ///
     /// A second, independent gate: the input contract is about what the *game*
@@ -171,6 +231,15 @@ impl Feature {
     /// Which feature a runtime filename implements.
     pub fn from_runtime(file_name: &str) -> Option<Feature> {
         let lower = file_name.to_ascii_lowercase();
+        // The Streamline plugin is the stronger signal and is checked first.
+        // `nvngx_*.dll` is the model the plugin loads, and it can sit in a
+        // folder for all sorts of reasons; `sl.dlss_nr.dll` is there because
+        // the game was built to ask Streamline for feature 1004.
+        for feature in Feature::ALL {
+            if lower == feature.streamline_plugin().0 {
+                return Some(feature);
+            }
+        }
         // Longest first: `nvngx_dlssd` and `nvngx_dlssg` both start with
         // `nvngx_dlss`, so the plain upscaler has to be tested last.
         for (needle, feature) in [
@@ -372,6 +441,15 @@ pub struct Outlook {
     pub note: String,
     /// False when we are reasoning from inference rather than documentation.
     pub documented: bool,
+    /// Set when the feature needs an add-on to invoke it, whatever the game
+    /// provides.
+    ///
+    /// Deliberately separate from `quality`, because they answer different
+    /// questions. Quality is "how good will it look" - a game that feeds the
+    /// G-buffer gives neural rendering real data. This is "what do I have to
+    /// install", and for neural rendering the answer is always "more than the
+    /// runtime", because no game can ask for it directly.
+    pub needs_consumer_addon: Option<String>,
 }
 
 /// What each feature would look like in this game, on this route.
@@ -384,6 +462,19 @@ pub fn outlook(
 ) -> Outlook {
     let documented = feature.requirements_documented();
     let fed_by_game = game_feeds.iter().any(|have| have.satisfies(feature));
+    // A feature the game does not itself request needs something to request it
+    // on the game's behalf. This used to be hard-coded for neural rendering on
+    // the false premise that no game could ever ask for it; it is now decided
+    // by what the game ships, which is both correct and the same rule for
+    // every feature.
+    let needs_consumer_addon = (!game_feeds.contains(&feature)).then(|| {
+        let (plugin, id) = feature.streamline_plugin();
+        format!(
+            "This game does not ship {plugin}, so it never asks Streamline for {} \
+             (feature {id}) - something has to request it on the game's behalf.",
+            feature.label()
+        )
+    });
 
     // The hardware gate is independent of the input contract and is decided
     // first: what a game feeds is beside the point if the card cannot execute
@@ -407,6 +498,7 @@ pub fn outlook(
                     card.label()
                 ),
                 documented,
+                needs_consumer_addon,
             };
         }
     }
@@ -421,12 +513,28 @@ pub fn outlook(
                 route,
                 estimated: Vec::new(),
                 out_of_reach: Vec::new(),
-                note: format!(
-                    "This game feeds {} itself, so replacing {} is all that is needed.",
-                    feature.label(),
-                    feature.runtime()
-                ),
+                note: if needs_consumer_addon.is_some() {
+                    // The game produces everything the feature consumes, but
+                    // it never asks for the feature - so the runtime alone
+                    // changes nothing. Saying "just replace the runtime" here
+                    // was the wrong sentence, and the one a user would act on.
+                    format!(
+                        "This game produces everything {} needs, so it will run on real data - \
+                         but it never asks for the feature, so {} has to go in alongside an \
+                         add-on that requests {} rather than on its own.",
+                        feature.label(),
+                        feature.runtime(),
+                        feature.streamline_plugin().1
+                    )
+                } else {
+                    format!(
+                        "This game feeds {} itself, so replacing {} is all that is needed.",
+                        feature.label(),
+                        feature.runtime()
+                    )
+                },
                 documented,
+                needs_consumer_addon,
             };
         }
 
@@ -449,6 +557,20 @@ pub fn outlook(
                     "This game does not use {}, so a newer runtime alone will not enable it.",
                     feature.label()
                 )
+            } else if game_feeds.is_empty() {
+                // No feature reads as fed. Saying "this game has DLSS but not
+                // X" here would be false: what is actually beside the
+                // executable is a runtime file nothing calls - typically one
+                // dropped in by hand, which is why it passed the file check
+                // and failed the provenance one.
+                format!(
+                    "A DLSS runtime file is present, but nothing in this game drives it: it \
+                     never produces {}. Putting {} beside it would change nothing - a file in \
+                     the folder is not the same as the renderer using it, and this feature \
+                     needs one of the other routes.",
+                    list(&missing),
+                    feature.runtime()
+                )
             } else {
                 format!(
                     "This game has DLSS but not {}, so it never produces {}. Putting {} beside \
@@ -459,6 +581,7 @@ pub fn outlook(
                 )
             },
             documented,
+            needs_consumer_addon,
         };
     }
 
@@ -477,6 +600,7 @@ pub fn outlook(
                 feature.label()
             ),
             documented,
+            needs_consumer_addon,
         };
     }
 
@@ -545,6 +669,7 @@ pub fn outlook(
         out_of_reach,
         note,
         documented,
+        needs_consumer_addon,
     }
 }
 
@@ -590,6 +715,91 @@ mod tests {
             assert!(found.estimated.is_empty());
             assert!(found.out_of_reach.is_empty());
             assert!(found.note.contains(feature.runtime()));
+        }
+    }
+
+    #[test]
+    fn neural_rendering_always_needs_an_add_on_however_good_the_game_is() {
+        // A game that feeds ray reconstruction produces everything neural
+        // rendering consumes, so it gives it *real data* - the quality is
+        // native. But feeding a feature is not requesting it: unless the game
+        // ships `sl.dlss_nr.dll` it never asks Streamline for feature 1004,
+        // and the runtime alone does nothing.
+        //
+        // The two are deliberately separate answers: "how good will it look"
+        // and "what do I have to install".
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &[Feature::RayReconstruction],
+            Some(Generation::Blackwell),
+        );
+        assert_eq!(found.quality, Quality::Native, "the data is real");
+        let reason = found
+            .needs_consumer_addon
+            .as_deref()
+            .expect("a game that never requests the feature needs a consumer");
+        assert!(reason.contains("sl.dlss_nr.dll"), "{reason}");
+        assert!(reason.contains("1004"), "{reason}");
+        // And the sentence must not tell somebody a runtime swap suffices.
+        assert!(!found.note.contains("all that is needed"));
+        assert!(found.note.contains("rather than on its own"));
+    }
+
+    #[test]
+    fn a_game_that_ships_the_neural_plugin_needs_no_add_on() {
+        // The correction that motivated the rule above. Neural rendering is
+        // Streamline feature 1004, shipped as `sl.dlss_nr.dll` from 2.13 - so
+        // a game built against 2.13 requests it like anything else, and there
+        // is nothing for an add-on to do. Reporting otherwise would send a
+        // user to install a consumer their game does not need.
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::Streamline,
+            Route::NativeSwap,
+            &[Feature::NeuralRendering, Feature::RayReconstruction],
+            Some(Generation::Blackwell),
+        );
+
+        assert_eq!(found.quality, Quality::Native);
+        assert!(found.needs_consumer_addon.is_none());
+        assert!(found.note.contains("all that is needed"), "{}", found.note);
+    }
+
+    #[test]
+    fn the_streamline_plugin_is_stronger_evidence_than_the_runtime_file() {
+        // `sl.dlss_nr.dll` is there because the game was built to ask for
+        // feature 1004; `nvngx_dlssnr.dll` is the model it loads, and gets
+        // copied into folders by hand all the time. So the plugin name has to
+        // resolve, and it has to resolve to the same feature.
+        assert_eq!(
+            Feature::from_runtime("sl.dlss_nr.dll"),
+            Some(Feature::NeuralRendering)
+        );
+        assert_eq!(
+            Feature::from_runtime("sl.dlss_g.dll"),
+            Some(Feature::FrameGeneration)
+        );
+        assert_eq!(
+            Feature::from_runtime("sl.dlss.dll"),
+            Some(Feature::SuperResolution)
+        );
+        // `sl.common.dll` and `sl.reflex.dll` are not features of their own.
+        assert_eq!(Feature::from_runtime("sl.common.dll"), None);
+        assert_eq!(Feature::from_runtime("sl.reflex.dll"), None);
+    }
+
+    #[test]
+    fn only_frame_generation_and_neural_rendering_refuse_direct3d_11() {
+        // From the plugins' own `rhi` manifests. Ray reconstruction reads as
+        // d3d12-only if you reason by analogy with the other 1000-series
+        // features; `sl.dlss_d`'s manifest says `d3d11, d3d12, vk`, so it is
+        // pinned here to stop the analogy creeping back in.
+        assert!(!Feature::SuperResolution.requires_modern_rhi());
+        assert!(!Feature::RayReconstruction.requires_modern_rhi());
+        for feature in [Feature::FrameGeneration, Feature::NeuralRendering] {
+            assert!(feature.requires_modern_rhi(), "{feature:?}");
         }
     }
 
@@ -864,7 +1074,13 @@ mod tests {
             Feature::from_runtime("NVNGX_DLSSNR.DLL"),
             Some(Feature::NeuralRendering)
         );
-        assert_eq!(Feature::from_runtime("sl.dlss.dll"), None);
+        // `sl.dlss.dll` used to be rejected here. It is now recognised, and
+        // deliberately: it is the plugin the game links to request feature 0,
+        // which is better evidence than the model file beside it.
+        assert_eq!(
+            Feature::from_runtime("sl.dlss.dll"),
+            Some(Feature::SuperResolution)
+        );
         assert_eq!(Feature::from_runtime("d3d12.dll"), None);
     }
 
