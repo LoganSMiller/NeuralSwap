@@ -63,6 +63,32 @@ pub trait LayerRegistry {
     fn remove(&self, value: &str) -> Result<()>;
 }
 
+/// A registry with nothing in it, which refuses to be written.
+///
+/// For the two cases where there is genuinely nothing to talk to: a build for
+/// a platform that has no such registry, and a caller that is installing files
+/// only. Reads answer "no layers"; a write is a error rather than a silent
+/// success, because a caller that reaches one has asked for something this
+/// cannot do.
+pub struct NoRegistry;
+
+impl LayerRegistry for NoRegistry {
+    fn values(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+    fn add(&self, value: &str) -> Result<()> {
+        crate::error::fail(
+            Code::BadRequest,
+            format!("no Vulkan layer registry is available to register {value}"),
+        )
+    }
+    fn remove(&self, _value: &str) -> Result<()> {
+        // Nothing is registered, so it is already in the state asked for.
+        // Undo has to be idempotent: recovery runs it again after a crash.
+        Ok(())
+    }
+}
+
 /// What happened, in terms the user needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "outcome")]

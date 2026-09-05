@@ -63,6 +63,34 @@ pub struct JournalStep {
     pub replaced_sha256: Option<String>,
 }
 
+/// Something an install changed that is not a file in the game folder.
+///
+/// Every step above is a file: written, backed up, put back. This is the other
+/// kind, and it needs its own record because it cannot be undone by copying
+/// anything. There is exactly one today, and the enum exists rather than a
+/// bare struct so that adding a second is a compiler error at every place that
+/// has to handle it.
+///
+/// Effects are undone **before** files. A Vulkan layer's manifest points at a
+/// DLL in the shared directory; deregistering first means nothing can load it
+/// while the files are going away, rather than the other way round.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum Effect {
+    /// A Vulkan implicit layer registered for this account.
+    ///
+    /// Machine-wide, and reference counted: undoing it removes this game from
+    /// the list of those that want it, and only deregisters when that list
+    /// empties. See [`crate::install::layer`].
+    VulkanLayer {
+        /// Where the layer's files live - one directory for the machine, not
+        /// inside any game.
+        shared_dir: PathBuf,
+        /// The manifest file name inside it.
+        manifest: String,
+    },
+}
+
 /// The intent record, fsynced before a single target file is opened.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +117,16 @@ pub struct JournalRecord {
     /// something else has since been put inside one, it is not ours to delete.
     #[serde(default)]
     pub created_dirs: Vec<String>,
+    /// Changes outside the game folder, in the order they are applied.
+    ///
+    /// Kept alongside `steps` rather than merged into them, because the two
+    /// are undone differently and at different times, and because
+    /// [`super::recover::JournalState`] - which the behavioural vectors pin -
+    /// describes progress through the *files*. The recovery decision does not
+    /// change: an install with effects is discarded, rolled back, cleaned up
+    /// or quarantined on exactly the same grounds as one without.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
 }
 
 /// An open journal. Dropping this does **not** clean up: an abandoned journal
@@ -138,7 +176,22 @@ impl Journal {
     /// needed. The cost is one fsync per file, against a copy that already
     /// cost one.
     pub fn note_applied(&mut self, index: usize) -> Result<()> {
-        let line = format!("{{\"i\":{index}}}\n");
+        self.append(&format!("{{\"i\":{index}}}\n"))?;
+        self.applied.push(index);
+        Ok(())
+    }
+
+    /// Record that an effect outside the game folder has taken place.
+    ///
+    /// Written to the same log as the steps, under its own key, so one
+    /// append-only file remains the whole story of how far an install got. The
+    /// two counters do not interfere: the step count reads `"i"` lines and
+    /// ignores everything else.
+    pub fn note_effect(&mut self, index: usize) -> Result<()> {
+        self.append(&format!("{{\"e\":{index}}}\n"))
+    }
+
+    fn append(&mut self, line: &str) -> Result<()> {
         let path = self.dir.join(PROGRESS_FILE);
         let mut handle = File::options()
             .create(true)
@@ -150,9 +203,7 @@ impl Journal {
             .map_err(unwritable("could not append to progress log", &path))?;
         handle
             .sync_all()
-            .map_err(unwritable("could not flush progress log", &path))?;
-        self.applied.push(index);
-        Ok(())
+            .map_err(unwritable("could not flush progress log", &path))
     }
 
     /// Mark the install complete. Written last, after every step has been
@@ -179,6 +230,11 @@ impl Journal {
 pub struct Survey {
     pub dir: PathBuf,
     pub state: JournalState,
+    /// Effects recorded as done, from the same progress log.
+    ///
+    /// Not part of `state`, because that is what the recovery vectors pin and
+    /// the decision it feeds is about the files.
+    pub applied_effects: usize,
     /// `None` when the plan is missing or unreadable, which the state records.
     pub record: Option<JournalRecord>,
     pub recovery: Recovery,
@@ -249,21 +305,38 @@ fn survey_one(dir: &Path) -> Survey {
         dir: dir.to_path_buf(),
         recovery: decide_recovery(&state),
         state,
+        applied_effects: count_effects(&dir.join(PROGRESS_FILE)),
         record,
     }
 }
 
-/// Count the complete lines in the progress log.
+/// How many file steps were recorded as applied.
+fn count_progress(path: &Path) -> i64 {
+    count_entries(path, "\"i\"")
+}
+
+/// How many effects outside the game folder were recorded as done.
+///
+/// The same log, a different key. Kept out of
+/// [`super::recover::JournalState`] deliberately: that structure is what the
+/// behavioural vectors pin, and the recovery *decision* is about the files -
+/// an install with effects is discarded, rolled back, cleaned up or
+/// quarantined on exactly the same grounds as one without.
+fn count_effects(path: &Path) -> usize {
+    usize::try_from(count_entries(path, "\"e\"")).unwrap_or(0)
+}
+
+/// Count the complete entries of one kind in the progress log.
 ///
 /// A crash can leave the last line half-written, and a half-written line is
-/// not a step that finished. Counting newlines rather than lines is what makes
-/// that distinction: the trailing fragment has no newline and is not counted.
-fn count_progress(path: &Path) -> i64 {
+/// not a step that finished. Requiring the closing brace is what makes that
+/// distinction: a truncated `{"i":3` does not end in `}` and is not counted.
+fn count_entries(path: &Path, key: &str) -> i64 {
     let Ok(text) = fs::read_to_string(path) else {
         return 0;
     };
     text.lines()
-        .filter(|line| line.ends_with('}') && line.contains("\"i\""))
+        .filter(|line| line.ends_with('}') && line.contains(key))
         .count()
         .try_into()
         .unwrap_or(i64::MAX)
@@ -287,10 +360,13 @@ pub struct RecoveryOutcome {
 
 /// Act on every journal found. Safe to run at every launch, and safe to run
 /// twice: each individual undo is idempotent.
-pub fn recover_all(journal_root: &Path) -> Result<Vec<RecoveryOutcome>> {
+pub fn recover_all(
+    journal_root: &Path,
+    layers: &dyn crate::install::layer::LayerRegistry,
+) -> Result<Vec<RecoveryOutcome>> {
     let mut outcomes = Vec::new();
     for found in survey(journal_root)? {
-        outcomes.push(recover_one(&found));
+        outcomes.push(recover_one(&found, layers));
     }
     Ok(outcomes)
 }
@@ -301,11 +377,17 @@ pub fn recover_all(journal_root: &Path) -> Result<Vec<RecoveryOutcome>> {
 /// rather than leaving it for the next launch. It goes through exactly the
 /// same survey-and-decide path as recovery after a crash, so the immediate
 /// rollback and the one that happens days later cannot drift apart.
-pub fn recover_dir(dir: &Path) -> RecoveryOutcome {
-    recover_one(&survey_one(dir))
+pub fn recover_dir(
+    dir: &Path,
+    layers: &dyn crate::install::layer::LayerRegistry,
+) -> RecoveryOutcome {
+    recover_one(&survey_one(dir), layers)
 }
 
-fn recover_one(found: &Survey) -> RecoveryOutcome {
+fn recover_one(
+    found: &Survey,
+    layers: &dyn crate::install::layer::LayerRegistry,
+) -> RecoveryOutcome {
     let mut outcome = RecoveryOutcome {
         id: found.state.id.clone(),
         decision: found.recovery.decision,
@@ -316,25 +398,68 @@ fn recover_one(found: &Survey) -> RecoveryOutcome {
     };
 
     match found.recovery.decision {
-        // Nothing was changed, so there is nothing to undo. The backup
-        // directory of an inert journal holds no originals worth keeping.
+        // No *file* was changed. That is not the same as nothing having
+        // happened: an install can register a Vulkan layer before it writes
+        // anything, and the decision above is made on the file steps alone -
+        // deliberately, because it is what the behavioural vectors pin.
+        //
+        // So a discard still has to undo the effects, or an install that
+        // failed before its first write leaves the account changed. This was
+        // found by a test that expected a rollback and got a discard.
         RecoveryDecision::Discard => {
+            undo_effects(found, &mut outcome, layers);
             if let Err(error) = remove_tree(&found.dir) {
                 outcome.failures.push(error.to_string());
             }
         }
         // Committed: the bookkeeping goes, the backups stay. They belong to
-        // the manifest now.
+        // the manifest now - and so do the effects, which the install
+        // succeeded in making and which must therefore survive.
         RecoveryDecision::FinishCleanup => {
             if let Err(error) = remove_tree(&found.dir) {
                 outcome.failures.push(error.to_string());
             }
         }
-        // Kept exactly as found, untouched, for diagnosis.
+        // Kept exactly as found, untouched, for diagnosis. Untouched includes
+        // the effects: quarantine means we do not know what happened, and
+        // deregistering a layer on that basis could break another game.
         RecoveryDecision::Quarantine => {}
-        RecoveryDecision::RollBack => roll_back(found, &mut outcome),
+        RecoveryDecision::RollBack => roll_back(found, &mut outcome, layers),
     }
     outcome
+}
+
+/// Undo the effects the progress log says actually happened, newest first.
+///
+/// Separate from [`roll_back`] because it is needed by two decisions: a
+/// rollback, and a discard where a layer was registered before the first file
+/// was written.
+fn undo_effects(
+    found: &Survey,
+    outcome: &mut RecoveryOutcome,
+    layers: &dyn crate::install::layer::LayerRegistry,
+) {
+    let Some(record) = found.record.as_ref() else {
+        return;
+    };
+    for effect in record.effects.iter().take(found.applied_effects).rev() {
+        match effect {
+            Effect::VulkanLayer {
+                shared_dir,
+                manifest,
+            } => match crate::install::layer::deregister(
+                layers,
+                shared_dir,
+                manifest,
+                &record.game_dir,
+            ) {
+                Ok(what) => outcome
+                    .removed
+                    .push(format!("Vulkan layer {manifest}: {what:?}")),
+                Err(error) => outcome.failures.push(error.to_string()),
+            },
+        }
+    }
 }
 
 /// Undo the applied steps in reverse order.
@@ -346,13 +471,25 @@ fn recover_one(found: &Survey) -> RecoveryOutcome {
 /// Every step is attempted even if an earlier one fails, because a failure to
 /// restore one file is no reason to leave the other three swapped. What fails
 /// is collected and the journal is kept.
-fn roll_back(found: &Survey, outcome: &mut RecoveryOutcome) {
+fn roll_back(
+    found: &Survey,
+    outcome: &mut RecoveryOutcome,
+    layers: &dyn crate::install::layer::LayerRegistry,
+) {
     let Some(record) = found.record.as_ref() else {
         outcome
             .failures
             .push("no readable plan to roll back".to_owned());
         return;
     };
+
+    // Effects first, and files second.
+    //
+    // A Vulkan layer's manifest points at a DLL in the shared directory.
+    // Deregistering before the files go means nothing can load a layer whose
+    // library is disappearing underneath it; the other order leaves a window
+    // where the registry names something half removed.
+    undo_effects(found, outcome, layers);
 
     // The progress log says how many steps landed; the plan says what they
     // were. Anything past that count was never applied, so undoing it would
@@ -514,6 +651,7 @@ mod tests {
             created_at: 0,
             steps,
             created_dirs: Vec::new(),
+            effects: Vec::new(),
         }
     }
 
@@ -606,7 +744,7 @@ mod tests {
         .expect("begin");
         handle.note_applied(0).expect("note");
 
-        let outcomes = recover_all(&journals).expect("recover");
+        let outcomes = recover_all(&journals, &crate::install::layer::NoRegistry).expect("recover");
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].decision, RecoveryDecision::RollBack);
         assert!(outcomes[0].failures.is_empty(), "{:?}", outcomes[0]);
@@ -643,7 +781,7 @@ mod tests {
         .expect("begin");
         handle.note_applied(0).expect("note");
 
-        let outcomes = recover_all(&journals).expect("recover");
+        let outcomes = recover_all(&journals, &crate::install::layer::NoRegistry).expect("recover");
         assert_eq!(outcomes[0].removed, vec!["sl.dlss_g.dll"]);
         assert!(!target.exists());
     }
@@ -653,6 +791,118 @@ mod tests {
         let mut built = record(dir, steps);
         built.created_dirs = dirs.iter().map(|item| (*item).to_owned()).collect();
         built
+    }
+
+    /// Records what was asked of it, so ordering can be asserted.
+    use crate::install::layer::LayerRegistry as _;
+
+    #[derive(Default)]
+    struct RecordingRegistry {
+        values: std::sync::Mutex<Vec<String>>,
+        removed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::install::layer::LayerRegistry for RecordingRegistry {
+        fn values(&self) -> Result<Vec<String>> {
+            Ok(self
+                .values
+                .lock()
+                .map(|held| held.clone())
+                .unwrap_or_default())
+        }
+        fn add(&self, value: &str) -> Result<()> {
+            if let Ok(mut held) = self.values.lock() {
+                held.push(value.to_owned());
+            }
+            Ok(())
+        }
+        fn remove(&self, value: &str) -> Result<()> {
+            if let Ok(mut held) = self.values.lock() {
+                held.retain(|item| item != value);
+            }
+            if let Ok(mut held) = self.removed.lock() {
+                held.push(value.to_owned());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_rollback_undoes_a_machine_wide_effect_too() {
+        // The Vulkan layer is the one install that changes something outside
+        // the game folder. A rollback that put the files back and left the
+        // registration would leave the account changed by an install that
+        // failed.
+        let root = tempfile::tempdir().expect("tempdir");
+        let journals = root.path().join("journal");
+        let game = root.path().join("game");
+        let shared = root.path().join("vulkan-layer");
+        fs::create_dir_all(&game).expect("game dir");
+
+        let registry = RecordingRegistry::default();
+        // The state an install would have left: registered, and this game
+        // counted as wanting it.
+        crate::install::layer::register(&registry, &shared, "ReShade64.json", &game)
+            .expect("register");
+        assert_eq!(registry.values().expect("values").len(), 1);
+
+        let mut built = record(&game, Vec::new());
+        built.effects = vec![Effect::VulkanLayer {
+            shared_dir: shared.clone(),
+            manifest: "ReShade64.json".to_owned(),
+        }];
+        let mut handle = Journal::begin(&journals, built).expect("begin");
+        handle.note_effect(0).expect("note");
+
+        let outcomes = recover_all(&journals, &registry).expect("recover");
+        assert!(outcomes[0].failures.is_empty(), "{:?}", outcomes[0]);
+        assert!(
+            registry.values().expect("values").is_empty(),
+            "the registration must be gone"
+        );
+    }
+
+    #[test]
+    fn an_effect_that_never_happened_is_not_undone() {
+        // Same rule as the steps. The plan says what was intended; the
+        // progress log says what happened. Undoing an intent that never
+        // took place would deregister a layer this install never registered -
+        // and another game might be relying on it.
+        let root = tempfile::tempdir().expect("tempdir");
+        let journals = root.path().join("journal");
+        let game = root.path().join("game");
+        let other = root.path().join("other-game");
+        let shared = root.path().join("vulkan-layer");
+        fs::create_dir_all(&game).expect("game dir");
+
+        let registry = RecordingRegistry::default();
+        // Another game registered it earlier and still wants it.
+        crate::install::layer::register(&registry, &shared, "ReShade64.json", &other)
+            .expect("register");
+
+        let mut built = record(&game, Vec::new());
+        built.effects = vec![Effect::VulkanLayer {
+            shared_dir: shared.clone(),
+            manifest: "ReShade64.json".to_owned(),
+        }];
+        // Begun, but never noted as done.
+        Journal::begin(&journals, built).expect("begin");
+
+        let outcomes = recover_all(&journals, &registry).expect("recover");
+        assert!(outcomes[0].failures.is_empty(), "{:?}", outcomes[0]);
+        assert_eq!(
+            registry.values().expect("values").len(),
+            1,
+            "the other game's layer must survive"
+        );
+        assert!(
+            registry
+                .removed
+                .lock()
+                .map(|held| held.is_empty())
+                .unwrap_or(false),
+            "nothing should have been deregistered"
+        );
     }
 
     #[test]
@@ -689,7 +939,7 @@ mod tests {
         .expect("begin");
         handle.note_applied(0).expect("note");
 
-        let outcomes = recover_all(&journals).expect("recover");
+        let outcomes = recover_all(&journals, &crate::install::layer::NoRegistry).expect("recover");
         assert!(outcomes[0].failures.is_empty(), "{:?}", outcomes[0]);
         assert!(!target.exists(), "the file should be gone");
         assert!(
@@ -734,7 +984,7 @@ mod tests {
         .expect("begin");
         handle.note_applied(0).expect("note");
 
-        let outcomes = recover_all(&journals).expect("recover");
+        let outcomes = recover_all(&journals, &crate::install::layer::NoRegistry).expect("recover");
         // Ours is gone; theirs is not; the directory survives because it is
         // not empty. And none of that counts as a failure.
         assert!(outcomes[0].failures.is_empty(), "{:?}", outcomes[0]);
@@ -777,7 +1027,7 @@ mod tests {
         // Only the first step landed.
         handle.note_applied(0).expect("note");
 
-        recover_all(&journals).expect("recover");
+        recover_all(&journals, &crate::install::layer::NoRegistry).expect("recover");
         assert!(!created.exists(), "our file should be gone");
         assert!(untouched.is_file(), "a file we never wrote must survive");
     }
@@ -811,7 +1061,7 @@ mod tests {
         .expect("begin");
         handle.note_applied(0).expect("note");
 
-        let outcomes = recover_all(&journals).expect("recover");
+        let outcomes = recover_all(&journals, &crate::install::layer::NoRegistry).expect("recover");
         assert_eq!(outcomes[0].failures.len(), 1);
         assert!(outcomes[0].failures[0].contains("verifyFailed"));
         // Nothing was written, and the journal is kept so it can be looked at.
@@ -845,7 +1095,7 @@ mod tests {
         handle.note_applied(0).expect("note");
         handle.commit().expect("commit");
 
-        let outcomes = recover_all(&journals).expect("recover");
+        let outcomes = recover_all(&journals, &crate::install::layer::NoRegistry).expect("recover");
         assert_eq!(outcomes[0].decision, RecoveryDecision::FinishCleanup);
         assert!(!handle.dir().exists(), "the journal is bookkeeping");
         assert!(backup.is_file(), "the backup belongs to the manifest now");
@@ -865,7 +1115,7 @@ mod tests {
         assert_eq!(found[0].recovery.decision, RecoveryDecision::Quarantine);
         assert_eq!(found[0].recovery.reason, RecoveryReason::PlanUnreadable);
         // Quarantine means untouched.
-        recover_all(&journals).expect("recover");
+        recover_all(&journals, &crate::install::layer::NoRegistry).expect("recover");
         assert!(dir.join(PLAN_FILE).is_file());
     }
 
@@ -897,9 +1147,10 @@ mod tests {
         .expect("begin");
         handle.note_applied(0).expect("note");
 
-        let first = recover_all(&journals).expect("first pass");
+        let first = recover_all(&journals, &crate::install::layer::NoRegistry).expect("first pass");
         assert!(first[0].failures.is_empty());
-        let second = recover_all(&journals).expect("second pass");
+        let second =
+            recover_all(&journals, &crate::install::layer::NoRegistry).expect("second pass");
         assert!(second.is_empty(), "nothing should be left to recover");
     }
 

@@ -52,6 +52,12 @@ pub struct Request<'a> {
     /// The hardware generation this package's runtime needs, if it states one.
     /// Passed straight to the preflight, which decides what to do about it.
     pub requires: Option<crate::platform::gpu::Generation>,
+    /// Needed to undo a machine-wide effect if this install has to roll back.
+    ///
+    /// Passed in rather than constructed, for the same reason the fetcher is:
+    /// a test must not be able to reach the real registry and change the
+    /// developer's own Vulkan setup.
+    pub layers: &'a dyn crate::install::layer::LayerRegistry,
     pub cancel: &'a Cancel,
 }
 
@@ -233,6 +239,10 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
             })
             .collect(),
         created_dirs: created_dirs.clone(),
+        // No route produces one yet. When the Vulkan layer delivery lands
+        // here it fills this, and the rollback below already knows what to
+        // do with it.
+        effects: Vec::new(),
     };
     let mut journal = Journal::begin(request.journal_root, record)?;
 
@@ -264,7 +274,7 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
         }
         Err(error) => {
             // Undo through the journal, using the same path a crash would.
-            let undone = journal::recover_dir(journal.dir());
+            let undone = journal::recover_dir(journal.dir(), request.layers);
             let reached = if undone.failures.is_empty() {
                 Reached::RolledBack
             } else {
@@ -555,6 +565,7 @@ mod tests {
                 backup_root: &self.backups,
                 manifest_root: &self.manifests,
                 requires: None,
+                layers: &crate::install::layer::NoRegistry,
                 cancel: &self.cancel,
             })
             .expect("apply")

@@ -26,7 +26,6 @@ pub struct Installer {
     /// mistake to report, not a request to serialise.
     locks: KeyedLock,
     cancel: Mutex<Cancel>,
-    #[allow(dead_code)]
     /// Held rather than constructed at each call, so a test can supply one
     /// that lives in memory. Registering a Vulkan layer changes machine-wide
     /// state, and a test suite that could reach the real registry would be
@@ -72,7 +71,7 @@ impl Installer {
     /// resolves is a half-changed game folder and the user should not be
     /// invited to install on top of one.
     pub fn recover_at_startup(&self) -> Vec<journal::RecoveryOutcome> {
-        match journal::recover_all(&self.journal_root) {
+        match journal::recover_all(&self.journal_root, self.layers.as_ref()) {
             Ok(outcomes) => outcomes,
             Err(error) => {
                 // Not fatal: the app is still usable, and the journals are
@@ -151,6 +150,7 @@ impl Installer {
             backup_root: &self.backup_root,
             manifest_root: &self.manifest_root,
             requires: None,
+            layers: self.layers.as_ref(),
             cancel: &cancel,
         })
     }
