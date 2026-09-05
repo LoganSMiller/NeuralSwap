@@ -178,6 +178,14 @@ pub struct ProxySlot {
     /// means something is in the slot that we do not recognise - which is
     /// still decisive, because the slot is taken.
     pub owner: Option<Tool>,
+    /// Whether whatever is in the slot can host ReShade add-ons.
+    ///
+    /// A separate question from who owns it, and the one that decides whether
+    /// an add-on route works. Measured on this machine: Ready or Not's
+    /// `dxgi.dll` is OptiScaler, and it mentions "ReShade" six times because
+    /// it implements part of that interface - so "is it ReShade" answers yes
+    /// and is useless. The add-on marker answers no, which is the truth.
+    pub addon_capable: bool,
 }
 
 impl Survey {
@@ -211,9 +219,20 @@ impl Survey {
         if !tool.loads_by_proxy() {
             return self.tools.iter().any(|found| found.tool == tool);
         }
-        self.proxy
-            .as_ref()
-            .is_some_and(|slot| slot.owner == Some(tool))
+        self.proxy.as_ref().is_some_and(|slot| {
+            if slot.owner != Some(tool) {
+                return false;
+            }
+            // For the injector, owning the slot is not enough. ReShade ships
+            // in two builds and only one loads add-ons; the whole neural
+            // stack is add-ons, so the plain build gives an install where
+            // every file is right and nothing happens.
+            //
+            // Bitness is not checked here - this survey does not know what
+            // the executable is - and is settled at placement, where it is
+            // known.
+            tool != Tool::ReShade || slot.addon_capable
+        })
     }
 
     /// Present, but not in a position to do anything.
@@ -343,9 +362,13 @@ pub fn survey(directory: &Path) -> Survey {
     let proxy = PROXY_NAMES
         .iter()
         .find(|name| present.contains(**name))
-        .map(|name| ProxySlot {
-            file: (*name).to_owned(),
-            owner: identify_proxy(&directory.join(name)),
+        .map(|name| {
+            let (owner, addon_capable) = examine_proxy(&directory.join(name));
+            ProxySlot {
+                file: (*name).to_owned(),
+                owner,
+                addon_capable,
+            }
         });
 
     for (lower, original, is_dir) in &names {
@@ -417,6 +440,63 @@ pub fn survey(directory: &Path) -> Survey {
     }
 }
 
+/// What a file claiming to be ReShade actually is.
+///
+/// Being ReShade is not enough. ReShade ships in two builds and only one of
+/// them loads add-ons; the whole neural-rendering stack is add-ons, so the
+/// plain build produces an install where every file is correct and nothing
+/// happens. Nor is the right build enough on its own - a 64-bit DLL does not
+/// load in a 32-bit process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InjectorCheck {
+    pub is_reshade: bool,
+    /// Whether this build loads add-ons.
+    pub has_addon_support: bool,
+    /// 32 or 64, or `None` when the header could not be read.
+    pub bitness: Option<u8>,
+}
+
+impl InjectorCheck {
+    /// Whether this file can host add-ons for an executable of `bitness`.
+    pub fn usable_for(&self, bitness: u8) -> bool {
+        self.is_reshade && self.has_addon_support && self.bitness == Some(bitness)
+    }
+}
+
+/// The marker that distinguishes the add-on build.
+///
+/// Taken from DLSS5-Swapper's `isAddonReShade`, which tests for exactly this
+/// string, and confirmed against the shipping 6.8.0 add-on installer: it
+/// appears once in `ReShade64.dll` and once in `ReShade32.dll`, alongside 36
+/// occurrences of `ReShade` itself.
+///
+/// The negative case is untested here - the plain build is not distributed in
+/// the add-on installer, so there is nothing on this machine to check it
+/// against. The check is therefore only as good as that upstream reading, and
+/// it is recorded as such rather than presented as verified both ways.
+const ADDON_MARKER: &str = "Searching for add-ons";
+
+/// Inspect a DLL that is supposed to be ReShade.
+///
+/// A missing or unreadable file reports everything false rather than failing:
+/// this answers "can this be used", and "we could not tell" and "no" lead to
+/// the same action - install a build we do know about.
+pub fn inspect_injector(path: &Path) -> InjectorCheck {
+    let Ok(bytes) = std::fs::read(path) else {
+        return InjectorCheck {
+            is_reshade: false,
+            has_addon_support: false,
+            bitness: None,
+        };
+    };
+    InjectorCheck {
+        is_reshade: memchr::memmem::find(&bytes, b"ReShade").is_some(),
+        has_addon_support: memchr::memmem::find(&bytes, ADDON_MARKER.as_bytes()).is_some(),
+        bitness: crate::pe::PeFile::with(path, |pe| Some(pe.bitness()), None),
+    }
+}
+
 /// Which tool a proxy DLL turned out to be.
 ///
 /// Counted rather than merely found. OptiScaler implements part of ReShade's
@@ -427,17 +507,19 @@ pub fn survey(directory: &Path) -> Survey {
 ///
 /// A file we cannot read, or read and do not recognise, gives `None` - the
 /// slot is still taken, which is the part that matters.
-fn identify_proxy(path: &Path) -> Option<Tool> {
+fn examine_proxy(path: &Path) -> (Option<Tool>, bool) {
     // These are DLLs, not model blobs. A cap keeps a folder with something
     // enormous sitting under a proxy name from turning a scan into a read of
     // the whole file, and 64 MiB is far past any real injector.
     const MOST: u64 = 64 * 1024 * 1024;
     if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MOST) {
-        return None;
+        return (None, false);
     }
-    let bytes = std::fs::read(path).ok()?;
+    let Ok(bytes) = std::fs::read(path) else {
+        return (None, false);
+    };
 
-    PROXY_OWNERS
+    let owner = PROXY_OWNERS
         .iter()
         .map(|(needle, tool)| {
             let hits = memchr::memmem::find_iter(&bytes, needle.as_bytes()).count();
@@ -445,7 +527,13 @@ fn identify_proxy(path: &Path) -> Option<Tool> {
         })
         .filter(|(hits, _)| *hits > 0)
         .max_by_key(|(hits, _)| *hits)
-        .map(|(_, tool)| tool)
+        .map(|(_, tool)| tool);
+
+    // One read answers both questions. The file can be tens of megabytes, and
+    // reading it twice to ask two things about the same bytes would be a
+    // scan nobody thanks us for.
+    let addon_capable = memchr::memmem::find(&bytes, ADDON_MARKER.as_bytes()).is_some();
+    (owner, addon_capable)
 }
 
 #[cfg(test)]
@@ -492,6 +580,72 @@ mod tests {
         assert_eq!(slot.owner, Some(Tool::OptiScaler));
         assert!(survey.is_loading(Tool::OptiScaler));
         assert!(!survey.is_loading(Tool::ReShade));
+    }
+
+    #[test]
+    fn a_reshade_without_add_on_support_is_not_a_working_injector() {
+        // ReShade ships in two builds and only one loads add-ons. The whole
+        // neural stack is add-ons, so the plain build gives an install where
+        // every file is correct and nothing happens - the exact failure this
+        // project exists to remove, produced by an install that succeeded.
+        //
+        // Confirmed against the shipping 6.8.0 add-on installer: the marker
+        // appears once in ReShade64.dll and once in ReShade32.dll.
+        let plain = with_proxy("dxgi.dll", &[("ReShade", 36)]);
+        let found = survey(plain.path());
+        assert_eq!(
+            found.proxy.as_ref().and_then(|slot| slot.owner),
+            Some(Tool::ReShade)
+        );
+        assert!(!found.is_loading(Tool::ReShade), "no add-on support");
+
+        let addon = with_proxy("dxgi.dll", &[("ReShade", 36), ("Searching for add-ons", 1)]);
+        assert!(survey(addon.path()).is_loading(Tool::ReShade));
+    }
+
+    #[test]
+    fn mentioning_reshade_is_not_being_reshade() {
+        // Measured on this machine: Ready or Not's `dxgi.dll` is OptiScaler,
+        // and it carries the string "ReShade" six times because it implements
+        // part of that add-on interface. So "does it mention ReShade" answers
+        // yes and is useless; the add-on marker answers no, which is true.
+        let dir = with_proxy("dxgi.dll", &[("ReShade", 6), ("OptiScaler", 65)]);
+        let survey = survey(dir.path());
+
+        let slot = survey.proxy.as_ref().expect("a slot");
+        assert_eq!(slot.owner, Some(Tool::OptiScaler));
+        assert!(
+            !slot.addon_capable,
+            "OptiScaler cannot host ReShade add-ons"
+        );
+        assert!(!survey.is_loading(Tool::ReShade));
+    }
+
+    #[test]
+    fn an_injector_is_judged_on_build_and_bitness_together() {
+        // A 64-bit DLL does not load in a 32-bit process, however right the
+        // build is.
+        let check = InjectorCheck {
+            is_reshade: true,
+            has_addon_support: true,
+            bitness: Some(64),
+        };
+        assert!(check.usable_for(64));
+        assert!(!check.usable_for(32));
+
+        // And the right bitness of the wrong build is no better.
+        let plain = InjectorCheck {
+            is_reshade: true,
+            has_addon_support: false,
+            bitness: Some(64),
+        };
+        assert!(!plain.usable_for(64));
+
+        // A file we could not read at all answers no, because "we cannot
+        // tell" and "no" lead to the same action.
+        let unreadable = inspect_injector(Path::new("no-such-file-anywhere.dll"));
+        assert!(!unreadable.usable_for(64));
+        assert!(!unreadable.usable_for(32));
     }
 
     #[test]

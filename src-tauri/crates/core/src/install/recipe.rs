@@ -543,6 +543,9 @@ mod tests {
             proxy: Some(crate::scan::footprints::ProxySlot {
                 file: "dxgi.dll".to_owned(),
                 owner: Some(tool),
+                // Whatever is in the slot is assumed usable here; the case
+                // where it is not has its own test.
+                addon_capable: true,
             }),
         }
     }
