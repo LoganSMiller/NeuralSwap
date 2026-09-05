@@ -82,6 +82,14 @@ const NOT_A_GAME: &[&str] = &[
     "crashreport",
     "crashhandler",
     "unitycrashhandler",
+    // Chromium's crash handler, shipped by everything built on Electron or
+    // CEF - and by a good number of games. It caused a real misidentification:
+    // the NVIDIA driver has a profile for Twitch Studio that lists
+    // `crashpad_handler.exe`, so asking the driver about it made an install
+    // into Slay the Spire 2 report Twitch Studio's settings.
+    "crashpad",
+    // The .NET runtime's dump helper, shipped beside anything self-contained.
+    "createdump",
     "easyanticheat",
     "eac",
     "battleye",
@@ -318,6 +326,26 @@ mod tests {
         // found, which is worse than losing first place in a visible list.
         assert!(!is_probably_not_a_game("EpicGamesLauncher.exe"));
         assert!(!is_probably_not_a_game("GameLauncher.exe"));
+    }
+
+    #[test]
+    fn shared_runtime_helpers_are_excluded_outright() {
+        // These are not merely unlikely to be the game - they are shipped
+        // verbatim by hundreds of unrelated applications, so anything that
+        // identifies software by executable name will confuse them.
+        //
+        // The NVIDIA driver does exactly that: it has a profile for Twitch
+        // Studio listing `crashpad_handler.exe`, so asking it about the one in
+        // Slay the Spire 2's folder reported Twitch Studio's DLSS settings for
+        // a completely different game. Excluded, not just flagged, because a
+        // confident wrong answer is worse than no answer.
+        for name in [
+            "crashpad_handler.exe",
+            "CRASHPAD_HANDLER.EXE",
+            "createdump.exe",
+        ] {
+            assert!(is_probably_not_a_game(name), "{name} should be excluded");
+        }
     }
 
     #[test]

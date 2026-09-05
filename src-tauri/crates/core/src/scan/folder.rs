@@ -25,7 +25,8 @@ use super::candidates::{
 
 /// Detection generation. Bumping it invalidates every cached verdict, which is
 /// what makes a fix to the rules above take effect on folders already scanned.
-pub const RULES: i64 = 1;
+/// 2: `crashpad` and `createdump` added to the helper names.
+pub const RULES: i64 = 2;
 
 /// How deep to walk. Engines bury the real executable a few levels down
 /// (`Game/Binaries/Win64`); nothing legitimate is deeper than this.

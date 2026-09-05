@@ -21,6 +21,7 @@ use crate::error::Code;
 use crate::fsx::paths::safe_path;
 use crate::install::plan::{Plan, StepAction};
 use crate::platform::gpu::{self, Generation};
+use crate::scan::capability::Feature;
 use crate::scan::footprints;
 
 /// Kept as a fixed set rather than free text so the UI can explain each one
@@ -37,6 +38,7 @@ pub enum CheckName {
     SourceFiles,
     GraphicsCard,
     OtherTools,
+    DriverOverride,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,12 +120,197 @@ pub fn preflight(request: &Request<'_>) -> Preflight {
         check_source_files(request),
         check_graphics_card(request),
         check_other_tools(request),
+        check_driver_override(request),
     ];
 
     let ok = !checks
         .iter()
         .any(|check| check.outcome == CheckOutcome::Fail);
     Preflight { checks, ok }
+}
+
+/// Whether the NVIDIA driver is set to supply a runtime this install writes.
+///
+/// This is the check that exists because of a specific silent failure. With
+/// the NVIDIA App's DLSS Override on, the driver loads its own runtime from
+/// its NGX store and ignores whatever is in the game folder. Every file
+/// operation succeeds, the install reports success, and the game runs
+/// something else. Nothing in the filesystem shows it.
+///
+/// It warns rather than fails. The install is harmless and reversible, the
+/// user may be about to turn the override off, and the driver's settings are
+/// not ours to insist on. What matters is that the outcome is *stated* - an
+/// install that will have no effect is a fine thing to allow and a terrible
+/// thing to leave unsaid.
+///
+/// Only features this plan actually writes are considered. An override on
+/// super resolution is not worth mentioning to somebody installing neural
+/// rendering.
+fn check_driver_override(request: &Request<'_>) -> Check {
+    use crate::platform::driver_profile;
+
+    let writing: Vec<Feature> = features_written(request.plan);
+    if writing.is_empty() {
+        return pass(
+            CheckName::DriverOverride,
+            "this install does not replace a DLSS runtime",
+        );
+    }
+
+    // The driver keys its profiles by executable, and NGX loads a runtime from
+    // beside the executable - so the executables that matter are exactly the
+    // ones in the directory being installed into. Every one is asked rather
+    // than picking a favourite: which of them is "the" game executable is a
+    // guess, and it does not need making. If any of them is overridden, the
+    // install is at risk.
+    let executables = executables_beside(request);
+    let mut profiles: Vec<driver_profile::Profile> = executables
+        .iter()
+        .filter_map(|exe| driver_profile::for_executable(exe))
+        .collect();
+    // No per-game profile found, or no executable to ask about. The global
+    // profile still applies to this game, so it is the answer rather than a
+    // fallback.
+    if profiles.is_empty() {
+        profiles.extend(driver_profile::global());
+    }
+    if profiles.is_empty() {
+        return unknown(
+            CheckName::DriverOverride,
+            "could not read the NVIDIA driver's settings for this game",
+        );
+    }
+
+    // Which profile the clash came from decides what the user is told to do,
+    // because the two are different toggles in the NVIDIA app. Saying "turn it
+    // off for this game" when the setting is global sends somebody looking in
+    // the wrong screen.
+    let mut clashing: Vec<Feature> = Vec::new();
+    let mut from_named: Option<String> = None;
+    for profile in &profiles {
+        let overridden: Vec<Feature> = profile
+            .overridden()
+            .into_iter()
+            .filter(|feature| writing.contains(feature))
+            .collect();
+        if !overridden.is_empty() {
+            if let Some(name) = profile.name.as_deref() {
+                from_named = Some(name.to_owned());
+            }
+            clashing.extend(overridden);
+        }
+    }
+    clashing.sort_unstable();
+    clashing.dedup();
+
+    if clashing.is_empty() {
+        let named = profiles.iter().find_map(|profile| profile.name.as_deref());
+        return pass(
+            CheckName::DriverOverride,
+            match named {
+                Some(name) => {
+                    format!("the driver profile \"{name}\" is not set to override these runtimes")
+                }
+                None => "the driver is not set to override these runtimes".to_owned(),
+            },
+        );
+    }
+
+    let names: Vec<&str> = clashing.iter().map(|feature| feature.label()).collect();
+    let where_to_look = match from_named.as_deref() {
+        Some(name) => format!("in the NVIDIA app's settings for \"{name}\""),
+        None => "in the NVIDIA app's global graphics settings - it is set there rather than \
+                 for this game specifically"
+            .to_owned(),
+    };
+    Check {
+        name: CheckName::DriverOverride,
+        outcome: CheckOutcome::Warn,
+        detail: format!(
+            "DLSS Override is on for {}, so your driver will load its own runtime and ignore \
+             the one installed here. Turn it off {where_to_look}, or this install will make no \
+             difference.",
+            list_features(&names)
+        ),
+        code: None,
+    }
+}
+
+/// The executable file names in the directory this plan installs into.
+///
+/// Derived from the plan's own steps, so it names the directory the runtime
+/// will actually be loaded from rather than somewhere else in the game. A
+/// folder with no executable in it is normal - plenty of games keep their
+/// runtimes one level down - and yields nothing rather than an error.
+fn executables_beside(request: &Request<'_>) -> Vec<String> {
+    let Some(dir) = request
+        .plan
+        .steps
+        .iter()
+        .filter(|step| step.action != StepAction::Skip)
+        .find_map(|step| {
+            let rel = step.rel.replace('\\', "/");
+            rel.rsplit_once('/').map(|(dir, _)| dir.to_owned())
+        })
+    else {
+        // Installing into the game root, where the steps carry no directory.
+        return list_executables(request.game_dir);
+    };
+    list_executables(&request.game_dir.join(dir))
+}
+
+/// The game executables in one directory, helpers excluded.
+///
+/// The exclusion is not tidiness. The driver keys profiles by executable name,
+/// and generic helpers are shipped by hundreds of unrelated applications - so
+/// asking the driver about `crashpad_handler.exe` returns whichever profile
+/// happens to claim it. On this machine that made an install into Slay the
+/// Spire 2 report the DLSS Override setting for **Twitch Studio**, which is a
+/// worse failure than saying nothing: it is a confident, specific, wrong
+/// answer pointing the user at a screen that has nothing to do with the game.
+fn list_executables(dir: &Path) -> Vec<String> {
+    use crate::scan::candidates::is_probably_not_a_game;
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.to_ascii_lowercase().ends_with(".exe"))
+        .filter(|name| !is_probably_not_a_game(name))
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+/// The features whose runtime this plan writes.
+///
+/// Derived from the steps rather than declared, so it cannot drift from what
+/// the install actually does. Skipped steps do not count: a step that writes
+/// nothing cannot be overridden.
+fn features_written(plan: &Plan) -> Vec<Feature> {
+    let mut found: Vec<Feature> = plan
+        .steps
+        .iter()
+        .filter(|step| step.action != StepAction::Skip)
+        .filter_map(|step| {
+            let name = step.rel.rsplit(['/', '\\']).next().unwrap_or("");
+            Feature::from_runtime(name)
+        })
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+fn list_features(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 fn pass(name: CheckName, detail: impl Into<String>) -> Check {
@@ -615,13 +802,84 @@ mod tests {
     }
 
     #[test]
+    fn the_features_written_come_from_the_steps() {
+        // Derived rather than declared, so it cannot drift from what the
+        // install actually does.
+        let fixture = fixture(b"runtime bytes");
+        assert_eq!(
+            features_written(&fixture.plan),
+            vec![Feature::SuperResolution]
+        );
+    }
+
+    #[test]
+    fn a_skipped_step_writes_no_feature() {
+        // An identical file is skipped, and a step that writes nothing cannot
+        // be overridden by anything - warning about it would be noise on the
+        // one install guaranteed to change nothing anyway.
+        let contents = b"runtime bytes";
+        let fixture = fixture(contents);
+        let mut plan = fixture.plan.clone();
+        for step in &mut plan.steps {
+            step.action = StepAction::Skip;
+        }
+        assert!(features_written(&plan).is_empty());
+    }
+
+    #[test]
+    fn helper_executables_are_never_asked_about() {
+        // The driver identifies software by executable name, so a helper that
+        // ships with everything matches whichever profile claims it first.
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in [
+            "SlayTheSpire2.exe",
+            "crashpad_handler.exe",
+            "createdump.exe",
+            "UnityCrashHandler64.exe",
+            "readme.txt",
+        ] {
+            fs::write(dir.path().join(name), b"x").expect("write");
+        }
+
+        assert_eq!(list_executables(dir.path()), vec!["SlayTheSpire2.exe"]);
+    }
+
+    #[test]
+    fn the_driver_override_check_never_blocks_an_install() {
+        // The invariant that matters. Whatever this machine's driver is set
+        // to - and the check reads the real one - it must not be able to stop
+        // an install. The driver's settings are the user's, they are
+        // reversible in the NVIDIA app, and refusing to write a file over
+        // them would be us insisting on something that is not ours to insist
+        // on. Saying so is the whole job.
+        let fixture = fixture(b"runtime bytes");
+        let report = run(&fixture);
+        let outcome = outcome_of(&report, CheckName::DriverOverride);
+        assert_ne!(outcome, CheckOutcome::Fail);
+
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == CheckName::DriverOverride)
+            .expect("the check ran");
+        assert!(check.code.is_none(), "a warning carries no error code");
+        assert!(!check.detail.is_empty());
+
+        // And when it does warn, it has to say what to do about it rather
+        // than only that something is wrong.
+        if outcome == CheckOutcome::Warn {
+            assert!(check.detail.contains("NVIDIA app"), "{}", check.detail);
+        }
+    }
+
+    #[test]
     fn a_healthy_install_passes_everything() {
         let fixture = fixture(b"runtime bytes");
         let report = run(&fixture);
         assert!(report.ok, "{:?}", report.blockers());
         // Every check is reported, not just the failures - the user sees the
         // whole picture on one screen.
-        assert_eq!(report.checks.len(), 9);
+        assert_eq!(report.checks.len(), 10);
     }
 
     #[test]
@@ -636,7 +894,7 @@ mod tests {
         };
         let report = run(&broken);
         assert!(!report.ok);
-        assert_eq!(report.checks.len(), 9);
+        assert_eq!(report.checks.len(), 10);
         assert_eq!(
             outcome_of(&report, CheckName::GameDirectory),
             CheckOutcome::Fail
