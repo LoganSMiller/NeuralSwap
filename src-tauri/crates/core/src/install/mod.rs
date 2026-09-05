@@ -34,6 +34,7 @@ pub mod manifest;
 pub mod package;
 pub mod plan;
 pub mod preflight;
+pub mod recipe;
 pub mod recover;
 pub mod restore;
 pub mod version;

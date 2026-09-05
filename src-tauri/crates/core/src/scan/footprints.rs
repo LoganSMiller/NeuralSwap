@@ -83,6 +83,34 @@ impl Tool {
     }
 }
 
+impl Tool {
+    /// The catalogue entry this detected tool corresponds to, when there is
+    /// one.
+    ///
+    /// Two vocabularies meet here: what was found on disk, and what the
+    /// catalogue can install. The mapping has to be explicit because the
+    /// conflict rules are written in catalogue ids, and a detected tool that
+    /// silently failed to match one would be a conflict nobody was warned
+    /// about.
+    ///
+    /// `None` for the ones with no catalogue entry - a `.original` sibling
+    /// whose author cannot be named, and upstream tools we do not install.
+    pub const fn component_id(self) -> Option<&'static str> {
+        match self {
+            Tool::ReShade => Some("reshade"),
+            Tool::OptiScaler => Some("optiscaler"),
+            Tool::Dlss5Feeder => Some("dlss5-feeder"),
+            Tool::Dlss5Bridge => Some("dlss5-bridge"),
+            Tool::RenoDx => Some("renodx"),
+            Tool::Rtx40MfgUnlock => Some("rtx40-mfg-unlock"),
+            Tool::UltimateAsiLoader => Some("ultimate-asi-loader"),
+            Tool::DgVoodoo => Some("dgvoodoo2"),
+            // Not ours to install, so not in the catalogue.
+            Tool::Dlss5Swapper | Tool::RtxRemix | Tool::UnknownSwapper => None,
+        }
+    }
+}
+
 /// What was found, and where.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
