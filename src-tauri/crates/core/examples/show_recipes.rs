@@ -119,7 +119,11 @@ fn main() {
             &catalog,
             &built,
             &install_dir,
-            candidate.api.as_ref().map(|v| v.api),
+            &placement::Target {
+                bitness: candidate.bitness,
+                api: candidate.api.as_ref().map(|verdict| verdict.api),
+                imports: &imports,
+            },
         ) {
             match &item.delivery {
                 placement::Delivery::Proxy { dir, as_name, from } => {
@@ -130,13 +134,12 @@ fn main() {
                     )
                 }
                 placement::Delivery::VulkanLayer {
-                    dir,
                     manifest,
                     layer,
+                    library,
                 } => println!(
-                    "  place   {:<22} {}/  as Vulkan layer {layer} via {manifest}",
-                    item.component,
-                    at(dir)
+                    "  MACHINE {:<22} Vulkan layer {layer} via {manifest} -> {library}                      (registry, affects every Vulkan app)",
+                    item.component
                 ),
                 placement::Delivery::Copy { dir } => {
                     println!("  place   {:<22} {}/", item.component, at(dir))

@@ -18,7 +18,10 @@
 //! | Direct3D 9 | `d3d9.dll` |
 //! | OpenGL | `opengl32.dll` |
 //!
-//! # Except on Vulkan, where it is a layer
+//! Which pair of files applies is decided by the **executable's** bitness, not
+//! the host's: a 64-bit DLL does not load in a 32-bit process.
+//!
+//! # Except on Vulkan, where it is a machine-wide layer
 //!
 //! Vulkan has no library to impersonate usefully, so ReShade ships layer
 //! manifests instead - `ReShade64.json`, verified in the 6.8.0 installer:
@@ -29,11 +32,20 @@
 //!              "disable_environment": { "DISABLE_VK_LAYER_reshade_1": "1" } } }
 //! ```
 //!
-//! So on Vulkan the DLL **keeps its own name** and a registry value points the
-//! loader at the manifest beside it. Two consequences worth stating: the
-//! install shape is different (a registry write, not just files), and there is
-//! no proxy slot to contend for, so a Vulkan game can host an injector even
-//! when something else already holds `dxgi.dll`.
+//! Registration is a value under `HKCU\Software\Khronos\Vulkan\ImplicitLayers`
+//! naming the manifest's absolute path. **That is per account, not per game.**
+//! Every registered implicit layer applies to every Vulkan application, so
+//! installing this "into a game" is not what it sounds like - it changes the
+//! behaviour of all of them, and the files do not live in the game folder at
+//! all.
+//!
+//! Three things follow, and DLSS5-Swapper handles all three:
+//!
+//! - It has to be **reference counted**. Undoing one game must not deregister
+//!   a layer another game still wants, so the shared directory keeps a list.
+//! - A registration **we did not make is left alone**, rather than taken over.
+//! - There is **no proxy slot to contend for**, so a Vulkan game can host an
+//!   injector even when something else already holds `dxgi.dll`.
 //!
 //! There is an OpenXR manifest too, `XR_APILAYER_reshade`, on the same
 //! pattern. Not wired up here - nothing in the catalogue needs it yet - but it
@@ -42,9 +54,16 @@
 //! # Two proxies in one folder need two names
 //!
 //! `rtx40-mfg-unlock` requires both ReShade and Ultimate ASI Loader, and both
-//! load by proxy. They cannot both be `dxgi.dll`. The injector takes the
-//! graphics name because that is the one it has to intercept; the loader takes
-//! a name nothing graphical wants.
+//! load by proxy. Its author states the rule directly:
+//!
+//! > ReShade normally owns `dxgi.dll`, so give Ultimate ASI Loader a different
+//! > supported proxy name that the game imports at startup [...] Never install
+//! > both loaders under the same proxy filename.
+//!
+//! And the second half matters as much as the first: the name has to be one
+//! **the game actually imports**, because "a Vulkan game may never load
+//! `dxgi.dll` or `d3d12.dll`". The import table is already read for route
+//! detection, so the loader's name is chosen from it rather than fixed.
 
 use serde::{Deserialize, Serialize};
 
@@ -71,14 +90,31 @@ pub enum Delivery {
     },
     /// Registered as a Vulkan implicit layer rather than proxied.
     ///
-    /// The files keep their names; a registry value under
-    /// `SOFTWARE\Khronos\Vulkan\ImplicitLayers` names the manifest.
+    /// **Machine-wide, not per game.** The registry value under
+    /// `HKCU\Software\Khronos\Vulkan\ImplicitLayers` names an absolute path to
+    /// a manifest, and the Vulkan loader applies every registered implicit
+    /// layer to every Vulkan application on the account. So this delivery has
+    /// no directory inside the game at all: the files live in one shared
+    /// place, and installing it for one game changes the behaviour of all of
+    /// them.
+    ///
+    /// That has two consequences the file-copy deliveries do not have, both
+    /// taken from how DLSS5-Swapper handles it:
+    ///
+    /// 1. **It has to be reference counted.** Uninstalling from one game must
+    ///    not deregister the layer while another game still wants it, so the
+    ///    shared directory carries a list of the games that asked.
+    /// 2. **A registration we did not make is left alone.** If some other
+    ///    tool - or the user's own ReShade - already has a layer registered,
+    ///    taking it over would silently change a setup we do not own.
     VulkanLayer {
-        dir: String,
-        /// The manifest the registry value points at.
+        /// The manifest file name inside the shared directory.
         manifest: String,
         /// The layer's own name, for reporting and for the disable switch.
         layer: String,
+        /// The DLL the manifest's `library_path` must point at, which differs
+        /// by bitness and is rewritten on the way in.
+        library: String,
     },
     /// Nothing to copy: the user has to put the files there themselves.
     ///
@@ -96,13 +132,25 @@ pub enum Delivery {
 
 impl Delivery {
     /// The directory this delivery targets, relative to the game root.
-    pub fn dir(&self) -> &str {
+    ///
+    /// `None` for a Vulkan layer, which is registered machine-wide and writes
+    /// nothing into the game at all.
+    pub fn dir(&self) -> Option<&str> {
         match self {
-            Delivery::Copy { dir }
-            | Delivery::Proxy { dir, .. }
-            | Delivery::VulkanLayer { dir, .. }
-            | Delivery::ByHand { dir, .. } => dir,
+            Delivery::Copy { dir } | Delivery::Proxy { dir, .. } | Delivery::ByHand { dir, .. } => {
+                Some(dir)
+            }
+            Delivery::VulkanLayer { .. } => None,
         }
+    }
+
+    /// Whether this reaches outside the game folder.
+    ///
+    /// The one that does is the Vulkan layer, and it matters: an install that
+    /// changes machine-wide state has to say so before it runs, and has to be
+    /// undone by reference count rather than by deleting files.
+    pub fn is_machine_wide(&self) -> bool {
+        matches!(self, Delivery::VulkanLayer { .. })
     }
 
     /// Whether this is work the installer performs, as opposed to an
@@ -122,22 +170,60 @@ pub struct Placement {
     pub note: String,
 }
 
-/// The name Ultimate ASI Loader takes when ReShade is also being installed.
+/// Names Ultimate ASI Loader can take, best first.
 ///
-/// The loader supports several - `dinput8.dll`, `winmm.dll`, `dxgi.dll` and
-/// others - and `version.dll` is chosen precisely because nothing graphical
-/// wants it. Whichever the injector takes for the game's API, the two cannot
-/// collide.
-const LOADER_PROXY: &str = "version.dll";
+/// None of them is a graphics library, so whichever name the injector takes
+/// for the game's API, the two cannot collide. RTX40MFG-Unlock's author states
+/// the constraint directly:
+///
+/// > ReShade normally owns `dxgi.dll`, so give Ultimate ASI Loader a different
+/// > supported proxy name that the game imports at startup, commonly
+/// > `dinput8.dll` or `version.dll`. Never install both loaders under the same
+/// > proxy filename.
+///
+/// The list is ordered rather than a single constant because of the other half
+/// of that advice: the name has to be one **the game actually imports**. A
+/// proxy the game never loads is a file that sits there doing nothing, and the
+/// same author warns that "a Vulkan game may never load `dxgi.dll` or
+/// `d3d12.dll`".
+const LOADER_PROXIES: [&str; 4] = ["version.dll", "dinput8.dll", "winmm.dll", "dbghelp.dll"];
 
 /// ReShade's own file names, which are what its archive contains.
 ///
 /// Read from the 6.8.0 installer rather than assumed: six entries, being
 /// `ReShade64.dll`, `ReShade32.dll`, and a Vulkan and an OpenXR manifest for
-/// each bitness.
-const RESHADE_DLL: &str = "ReShade64.dll";
-const RESHADE_VULKAN_MANIFEST: &str = "ReShade64.json";
+/// each bitness. Which pair applies is decided by the executable's bitness,
+/// not by the host's - a 32-bit game loads a 32-bit injector or nothing.
 const RESHADE_VULKAN_LAYER: &str = "VK_LAYER_reshade";
+
+fn reshade_dll(bitness: u8) -> &'static str {
+    if bitness == 32 {
+        "ReShade32.dll"
+    } else {
+        "ReShade64.dll"
+    }
+}
+
+fn reshade_manifest(bitness: u8) -> &'static str {
+    if bitness == 32 {
+        "ReShade32.json"
+    } else {
+        "ReShade64.json"
+    }
+}
+
+/// What the executable is, for choosing files and proxy names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target<'a> {
+    /// 32 or 64. Anything else is treated as 64, which is the overwhelming
+    /// majority and the only one the modern routes support anyway.
+    pub bitness: u8,
+    /// What the executable talks to. `None` when the scan could not tell.
+    pub api: Option<Api>,
+    /// Lower-cased DLL names from the import table, used to pick a proxy the
+    /// game will actually load.
+    pub imports: &'a [String],
+}
 
 /// Decide where every step of a recipe belongs.
 ///
@@ -151,19 +237,45 @@ pub fn plan(
     catalog: &Catalog,
     recipe: &Recipe,
     install_dir: &str,
-    api: Option<Api>,
+    target: &Target<'_>,
 ) -> Vec<Placement> {
     let dir = install_dir.trim_end_matches(['/', '\\']).replace('\\', "/");
+    let loader = loader_proxy(target);
 
     recipe
         .steps
         .iter()
         .filter(|step| !step.already_present)
-        .filter_map(|step| place(catalog, step, &dir, api))
+        .filter_map(|step| place(catalog, step, &dir, target, loader))
         .collect()
 }
 
-fn place(catalog: &Catalog, step: &Step, dir: &str, api: Option<Api>) -> Option<Placement> {
+/// The name Ultimate ASI Loader should take for this executable.
+///
+/// Prefers one the game actually imports, because a proxy the game never
+/// loads is a file that sits there doing nothing - and for a Vulkan game that
+/// is the normal outcome of picking a DirectX name.
+///
+/// Falls back to the first candidate when the import table names none of them,
+/// which happens whenever it names nothing at all. The note on the placement
+/// says which of the two cases applied, so a user chasing a loader that never
+/// ran is told where to look.
+fn loader_proxy(target: &Target<'_>) -> &'static str {
+    let injector = target.api.map(Api::hook_name);
+    LOADER_PROXIES
+        .into_iter()
+        .find(|name| Some(*name) != injector && target.imports.iter().any(|import| import == name))
+        .unwrap_or(LOADER_PROXIES[0])
+}
+
+fn place(
+    catalog: &Catalog,
+    step: &Step,
+    dir: &str,
+    target: &Target<'_>,
+    loader: &'static str,
+) -> Option<Placement> {
+    let api = target.api;
     let component = catalog.get(&step.component)?;
 
     // A component nobody can fetch is an instruction, whatever its role.
@@ -188,14 +300,14 @@ fn place(catalog: &Catalog, step: &Step, dir: &str, api: Option<Api>) -> Option<
         // what the game talks to.
         Role::Injector => match api {
             Some(Api::Vulkan) => Delivery::VulkanLayer {
-                dir: dir.to_owned(),
-                manifest: RESHADE_VULKAN_MANIFEST.to_owned(),
+                manifest: reshade_manifest(target.bitness).to_owned(),
                 layer: RESHADE_VULKAN_LAYER.to_owned(),
+                library: reshade_dll(target.bitness).to_owned(),
             },
             Some(api) => Delivery::Proxy {
                 dir: dir.to_owned(),
                 as_name: api.hook_name().to_owned(),
-                from: RESHADE_DLL.to_owned(),
+                from: reshade_dll(target.bitness).to_owned(),
             },
             // The scan could not say what the executable uses - a game that
             // resolves Direct3D through `LoadLibrary` shows nothing
@@ -205,14 +317,14 @@ fn place(catalog: &Catalog, step: &Step, dir: &str, api: Option<Api>) -> Option<
             None => Delivery::Proxy {
                 dir: dir.to_owned(),
                 as_name: Api::Dxgi.hook_name().to_owned(),
-                from: RESHADE_DLL.to_owned(),
+                from: reshade_dll(target.bitness).to_owned(),
             },
         },
 
-        // Also a proxy, and deliberately not the same one. See LOADER_PROXY.
+        // Also a proxy, and deliberately not the same one. See LOADER_PROXIES.
         Role::Loader => Delivery::Proxy {
             dir: dir.to_owned(),
-            as_name: LOADER_PROXY.to_owned(),
+            as_name: loader.to_owned(),
             from: format!("{}.dll", component.id),
         },
 
@@ -241,9 +353,10 @@ fn place(catalog: &Catalog, step: &Step, dir: &str, api: Option<Api>) -> Option<
 fn describe(delivery: &Delivery, name: &str, api: Option<Api>) -> String {
     match delivery {
         Delivery::VulkanLayer { layer, .. } => format!(
-            "{name} installs as the Vulkan layer {layer} rather than replacing a library, so \
-             it keeps its own name and is enabled through the registry. Nothing else in the \
-             folder can be displaced by it."
+            "{name} installs as the Vulkan layer {layer}, which is a registry entry rather \
+             than a file in this game. Nothing here is displaced by it - but the layer \
+             applies to every Vulkan program on this account, not only this game, and it \
+             stays until the last game using it is undone."
         ),
         Delivery::Proxy { as_name, from, .. } => match api {
             Some(api) => format!(
@@ -296,6 +409,15 @@ mod tests {
         )
     }
 
+    /// A 64-bit target with the given API and no imports worth naming.
+    fn target(api: Option<Api>) -> Target<'static> {
+        Target {
+            bitness: 64,
+            api,
+            imports: &[],
+        }
+    }
+
     fn find<'a>(placed: &'a [Placement], id: &str) -> &'a Placement {
         placed
             .iter()
@@ -313,14 +435,14 @@ mod tests {
             (Api::D3d9, "d3d9.dll"),
             (Api::OpenGl, "opengl32.dll"),
         ] {
-            let placed = plan(&catalog, &built, "bin/x64", Some(api));
+            let placed = plan(&catalog, &built, "bin/x64", &target(Some(api)));
             let reshade = find(&placed, "reshade");
             assert_eq!(
                 reshade.delivery,
                 Delivery::Proxy {
                     dir: "bin/x64".to_owned(),
                     as_name: expected.to_owned(),
-                    from: RESHADE_DLL.to_owned(),
+                    from: reshade_dll(64).to_owned(),
                 },
                 "{api:?}"
             );
@@ -334,7 +456,12 @@ mod tests {
         // `dxgi.dll` for a Vulkan game would install something that never
         // loads.
         let catalog = default_catalog();
-        let placed = plan(&catalog, &feeder_recipe(), "bin", Some(Api::Vulkan));
+        let placed = plan(
+            &catalog,
+            &feeder_recipe(),
+            "bin",
+            &target(Some(Api::Vulkan)),
+        );
         let reshade = find(&placed, "reshade");
 
         match &reshade.delivery {
@@ -355,7 +482,7 @@ mod tests {
         // says nothing. Guessing is unavoidable; presenting the guess as a
         // finding is not.
         let catalog = default_catalog();
-        let placed = plan(&catalog, &feeder_recipe(), "", None);
+        let placed = plan(&catalog, &feeder_recipe(), "", &target(None));
         let reshade = find(&placed, "reshade");
 
         match &reshade.delivery {
@@ -371,7 +498,12 @@ mod tests {
     #[test]
     fn shaders_go_where_reshade_reads_them() {
         let catalog = default_catalog();
-        let placed = plan(&catalog, &feeder_recipe(), "bin/x64", Some(Api::Dxgi));
+        let placed = plan(
+            &catalog,
+            &feeder_recipe(),
+            "bin/x64",
+            &target(Some(Api::Dxgi)),
+        );
         let lumenite = find(&placed, "lumenite");
         assert_eq!(
             lumenite.delivery,
@@ -384,7 +516,12 @@ mod tests {
     #[test]
     fn runtimes_and_addons_sit_beside_the_executable() {
         let catalog = default_catalog();
-        let placed = plan(&catalog, &feeder_recipe(), "bin/x64", Some(Api::Dxgi));
+        let placed = plan(
+            &catalog,
+            &feeder_recipe(),
+            "bin/x64",
+            &target(Some(Api::Dxgi)),
+        );
         for id in ["nvngx-dlssnr", "dlss5-feeder"] {
             assert_eq!(
                 find(&placed, id).delivery,
@@ -426,7 +563,7 @@ mod tests {
             clashes: Vec::new(),
         };
 
-        let placed = plan(&catalog, &built, "bin", Some(Api::Dxgi));
+        let placed = plan(&catalog, &built, "bin", &target(Some(Api::Dxgi)));
         let names: Vec<&str> = placed
             .iter()
             .filter_map(|item| match &item.delivery {
@@ -448,13 +585,117 @@ mod tests {
     }
 
     #[test]
+    fn a_thirty_two_bit_game_gets_the_thirty_two_bit_injector() {
+        // A 64-bit DLL in a 32-bit process does not load. The bitness comes
+        // from the executable, not from the host.
+        let catalog = default_catalog();
+        let thirty_two = Target {
+            bitness: 32,
+            api: Some(Api::D3d9),
+            imports: &[],
+        };
+        let placed = plan(&catalog, &feeder_recipe(), "bin", &thirty_two);
+        match &find(&placed, "reshade").delivery {
+            Delivery::Proxy { from, as_name, .. } => {
+                assert_eq!(from, "ReShade32.dll");
+                assert_eq!(as_name, "d3d9.dll");
+            }
+            other => panic!("expected a proxy, got {other:?}"),
+        }
+
+        // And its Vulkan manifest is the 32-bit one, pointing at the 32-bit
+        // library.
+        let vulkan = Target {
+            bitness: 32,
+            api: Some(Api::Vulkan),
+            imports: &[],
+        };
+        match &find(&plan(&catalog, &feeder_recipe(), "bin", &vulkan), "reshade").delivery {
+            Delivery::VulkanLayer {
+                manifest, library, ..
+            } => {
+                assert_eq!(manifest, "ReShade32.json");
+                assert_eq!(library, "ReShade32.dll");
+            }
+            other => panic!("expected a layer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_loader_takes_a_name_the_game_actually_imports() {
+        // RTX40MFG-Unlock's author: "a Vulkan game may never load `dxgi.dll`
+        // or `d3d12.dll`". The same applies to the loader's own name - a
+        // proxy the game never loads is a file that sits there doing nothing.
+        let imports: Vec<String> = ["vulkan-1.dll", "winmm.dll", "kernel32.dll"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let vulkan_game = Target {
+            bitness: 64,
+            api: Some(Api::Vulkan),
+            imports: &imports,
+        };
+        // `version.dll` is first in the list, but this game does not import
+        // it; `winmm.dll` it does.
+        assert_eq!(loader_proxy(&vulkan_game), "winmm.dll");
+
+        // Nothing recognisable imported: fall back rather than fail, because
+        // an import table that names nothing is normal.
+        let silent = Target {
+            bitness: 64,
+            api: Some(Api::Dxgi),
+            imports: &[],
+        };
+        assert_eq!(loader_proxy(&silent), LOADER_PROXIES[0]);
+    }
+
+    #[test]
+    fn the_loader_never_takes_the_injectors_name() {
+        // Even if the game imports it. Whichever name the injector needs for
+        // the API, the loader must choose another.
+        for api in [Api::Dxgi, Api::D3d9, Api::OpenGl] {
+            let imports: Vec<String> = LOADER_PROXIES
+                .iter()
+                .chain([&api.hook_name()])
+                .map(|name| (*name).to_owned())
+                .collect();
+            let target = Target {
+                bitness: 64,
+                api: Some(api),
+                imports: &imports,
+            };
+            assert_ne!(loader_proxy(&target), api.hook_name(), "{api:?}");
+        }
+    }
+
+    #[test]
+    fn a_vulkan_layer_writes_nothing_into_the_game() {
+        // It is a registry entry, machine-wide, and the note has to say so -
+        // it changes the behaviour of every Vulkan program on the account,
+        // which is not what "install into this game" sounds like.
+        let catalog = default_catalog();
+        let placed = plan(
+            &catalog,
+            &feeder_recipe(),
+            "bin",
+            &target(Some(Api::Vulkan)),
+        );
+        let reshade = find(&placed, "reshade");
+
+        assert!(reshade.delivery.dir().is_none());
+        assert!(reshade.delivery.is_machine_wide());
+        assert!(reshade.note.contains("every Vulkan"), "{}", reshade.note);
+        assert!(reshade.note.contains("last game"), "{}", reshade.note);
+    }
+
+    #[test]
     fn a_loader_and_an_injector_never_agree_on_a_name() {
         // The constraint stated directly, independent of whether a recipe
         // happens to contain both today.
         for api in [Api::Dxgi, Api::D3d9, Api::OpenGl, Api::D3d8] {
             assert_ne!(
                 api.hook_name(),
-                LOADER_PROXY,
+                LOADER_PROXIES[0],
                 "the loader would collide with an injector on {api:?}"
             );
         }
@@ -475,7 +716,7 @@ mod tests {
         assert!(!by_hand.is_empty(), "the catalogue has none to test");
 
         let built = feeder_recipe();
-        let placed = plan(&catalog, &built, "bin", Some(Api::Dxgi));
+        let placed = plan(&catalog, &built, "bin", &target(Some(Api::Dxgi)));
         for item in &placed {
             if by_hand.contains(&item.component.as_str()) {
                 assert!(!item.delivery.is_ours(), "{}", item.component);
@@ -496,7 +737,7 @@ mod tests {
         // shown by the recipe and does nothing here.
         let catalog = default_catalog();
         let built = feeder_recipe();
-        let placed = plan(&catalog, &built, "bin", Some(Api::Dxgi));
+        let placed = plan(&catalog, &built, "bin", &target(Some(Api::Dxgi)));
         assert_eq!(
             placed.len(),
             built.to_install().len(),
@@ -508,13 +749,20 @@ mod tests {
     fn every_placement_explains_itself() {
         let catalog = default_catalog();
         for api in [None, Some(Api::Dxgi), Some(Api::Vulkan), Some(Api::D3d9)] {
-            for placed in plan(&catalog, &feeder_recipe(), "bin/x64", api) {
+            for placed in plan(&catalog, &feeder_recipe(), "bin/x64", &target(api)) {
                 assert!(!placed.note.is_empty(), "{}", placed.component);
-                // Nothing may be placed outside the game folder.
-                let dir = placed.delivery.dir();
-                assert!(!dir.starts_with('/'), "{dir}");
-                assert!(!dir.contains(".."), "{dir}");
-                assert!(!dir.contains(':'), "{dir}");
+                // Nothing that targets the game folder may point outside it.
+                // A Vulkan layer has no directory at all, and is the one
+                // delivery allowed to reach beyond the game - loudly.
+                match placed.delivery.dir() {
+                    Some(dir) => {
+                        assert!(!dir.starts_with('/'), "{dir}");
+                        assert!(!dir.contains(".."), "{dir}");
+                        assert!(!dir.contains(':'), "{dir}");
+                        assert!(!placed.delivery.is_machine_wide());
+                    }
+                    None => assert!(placed.delivery.is_machine_wide()),
+                }
             }
         }
     }
