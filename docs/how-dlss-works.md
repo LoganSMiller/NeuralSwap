@@ -166,8 +166,8 @@ and carries its own updater. Two consequences:
 - **The user's own driver install is a legitimate local source.** For source
   discovery, the DriverStore should be searched alongside their games — no
   download, no mirror, no redistribution, and the file is by definition a
-  genuine NVIDIA build. It does not carry `nvngx_dlss.dll`, `nvngx_dlssd.dll`
-  or `nvngx_dlssnr.dll`, so it covers one feature of four.
+  genuine NVIDIA build. This directory covers one feature of four.
+  **But see §3.4 — that is a fact about this directory, not about the driver.**
 - **`nvngx_update.exe` is the OTA machinery**, which makes §5's caveat concrete
   rather than theoretical: there is a program on disk whose job is replacing
   these files.
@@ -177,6 +177,55 @@ That is NVIDIA's frame-timing measurement library, and it is the obvious way to
 answer "what did this install actually do to my frame times" with a measurement
 rather than a claim. It has its own licence and needs its service running, so it
 is an opportunity noted rather than a dependency taken.
+
+## 3.4 The NGX model store carries three features of four
+
+The DriverStore is not where the driver keeps the runtimes it actually serves.
+That is `C:\ProgramData\NVIDIA\NGX\models`, and it is entirely self-describing:
+
+```
+models/
+  nvngx_config.txt                                which version is active, per component
+  dlss/versions/20318081/files/160_E658700.bin    74 MB  → nvngx_dlss.dll
+  dlssd/versions/20318081/files/160_E658700.bin   80 MB  → nvngx_dlssd.dll
+  dlssg/versions/20318081/files/160_E658700.bin    7 MB  → nvngx_dlssg.dll
+  dlss_override/versions/20318081/files/160_E658700/
+      nvngx_package_config.txt                    declares the three above
+      sl.dlss.dll  sl.dlss_d.dll  sl.dlss_g.dll  sl.common.dll  …
+```
+
+Each `nvngx_package_config.txt` is one comma-separated row per file —
+`component, version, stored extension, real name`:
+
+```
+dlss, 310.7.129, .bin, nvngx_dlss.dll
+sl_common_0, 2.14.0, .dll, sl.common.dll
+```
+
+So the store declares both what a file *is* and what it must be called when
+installed. Version keys are shared across components, which is how a matched
+set stays matched. Runtimes are stored as `.bin`; they are ordinary PE images.
+
+**Three of four features are sourceable from the driver**, at 310.7.129 —
+super resolution, ray reconstruction and frame generation — plus complete
+Streamline sets at 2.12.129 and **2.14.0**, which is newer than any public SDK.
+Measured on this machine, source discovery finds 3 driver candidates against
+19 from 11 installed games, and it is the driver's copy that ranks first
+because its provenance needs no inference.
+
+**Neural rendering is the exception, and its absence is informative.** There is
+no `nvngx_dlssnr.dll` and no `sl.dlss_nr.dll` anywhere in the store. The driver
+does not carry neural rendering, so it cannot be sourced this way — on this
+machine the only copy is the one a tool hand-installed into a game.
+
+### The declared version beats the file's own
+
+These runtimes are tens to hundreds of megabytes of model weights around a thin
+PE wrapper. Scanning one for a `VS_FIXEDFILEINFO` signature finds a match
+*inside the weights* long before the real resource, and reads out as
+`46863.0.46863.4696` for every file in the store. The manifest says
+`310.7.129`. Where the two disagree the manifest wins: it is a statement by the
+installer, not a guess about a byte pattern.
 
 ## 4. Signing is part of the loading contract
 

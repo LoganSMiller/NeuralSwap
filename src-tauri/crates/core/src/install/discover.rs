@@ -98,9 +98,12 @@ pub struct Candidate {
 ///
 /// Verified on this machine: `nvngx.dll`, `_nvngx.dll` and a 9.3 MB
 /// `nvngx_dlssg.dll` live under `nvhmi.inf_amd64_*`, alongside
-/// `nvngx_update.exe` - which is the over-the-air machinery, on disk. The
-/// driver does not carry the super resolution, ray reconstruction or neural
-/// rendering runtimes, so this covers one feature of four.
+/// `nvngx_update.exe` - which is the over-the-air machinery, on disk.
+///
+/// This location carries frame generation and nothing else, so on its own it
+/// covers one feature of four. That was once written here as a fact about the
+/// driver; it is only a fact about this directory. See [`from_ngx_store`],
+/// which finds three of four somewhere else entirely.
 fn driver_store_roots() -> Vec<PathBuf> {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
     let repository = Path::new(&root)
@@ -157,6 +160,206 @@ pub fn from_driver_store() -> Vec<Candidate> {
         }
     }
     found
+}
+
+/// The driver's NGX model store, which is a different thing from the driver
+/// store and carries far more.
+///
+/// `%ProgramData%\NVIDIA\NGX\models` is where the driver keeps the runtimes it
+/// serves for its own DLSS Override feature, and it is entirely
+/// self-describing. Layout, verified on this machine:
+///
+/// ```text
+/// models/
+///   nvngx_config.txt                  which version is active, per component
+///   dlss/versions/20318081/files/160_E658700.bin        74 MB
+///   dlssd/versions/20318081/files/160_E658700.bin       80 MB
+///   dlssg/versions/20318081/files/160_E658700.bin        7 MB
+///   dlss_override/versions/20318081/files/160_E658700/
+///       nvngx_package_config.txt      declares the three above
+///       sl.dlss.dll, sl.dlss_d.dll, ...
+/// ```
+///
+/// A `nvngx_package_config.txt` holds one comma-separated row per file:
+///
+/// ```text
+/// dlss, 310.7.129, .bin, nvngx_dlss.dll
+/// sl_common_0, 2.14.0, .dll, sl.common.dll
+/// ```
+///
+/// That is `component, version, stored extension, real name` - so the store
+/// declares both what a file *is* and what it should be called when installed,
+/// which is exactly what this module otherwise has to infer. The file itself
+/// sits either in the package directory or at
+/// `<component>/versions/<key>/files/<prefix>_<app><ext>`, sharing the version
+/// key across components so a matched set stays matched.
+///
+/// # Two things this corrects
+///
+/// The comment on [`driver_store_roots`] used to say the driver carries only
+/// frame generation, "one feature of four". That was true of the driver store
+/// and false of the machine: the NGX store has super resolution, ray
+/// reconstruction *and* frame generation at 310.7.129. Three of four, from a
+/// genuine NVIDIA source, with no redistribution.
+///
+/// The fourth is still missing, and its absence is informative: there is no
+/// `sl.dlss_nr.dll` and no neural rendering runtime anywhere in the store. The
+/// driver does not carry neural rendering, so it cannot be sourced this way.
+///
+/// # Why the declared version is trusted over the file's own
+///
+/// These files are hundreds of megabytes of model weights around a thin PE
+/// wrapper, and scanning one for a `VS_FIXEDFILEINFO` signature finds a match
+/// inside the weights long before the real resource - which reads out as
+/// `46863.0.46863.4696`. The manifest says `310.7.129`. Where the two differ
+/// the manifest wins, because it is a statement by the installer rather than a
+/// guess about a byte pattern.
+pub fn from_ngx_store() -> Vec<Candidate> {
+    let Some(root) = ngx_store_root() else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for package in package_configs(&root) {
+        let Some(files) = package.parent() else {
+            continue;
+        };
+        // `<component>/versions/<key>/files/<prefix>_<app>` - the key is three
+        // levels up from the package directory, and is what ties a component's
+        // file to the package that declares it.
+        let Some(version_key) = files
+            .parent()
+            .and_then(|dir| dir.parent())
+            .and_then(|dir| dir.file_name())
+            .map(|key| key.to_owned())
+        else {
+            continue;
+        };
+        let stem = files.file_name().map(|name| name.to_owned());
+
+        let Ok(text) = std::fs::read_to_string(&package) else {
+            continue;
+        };
+        for row in text.lines() {
+            let Some(row) = PackageRow::parse(row) else {
+                continue;
+            };
+            let Some(feature) = Feature::from_runtime(&row.real_name) else {
+                // Streamline plugins and the components with no feature of
+                // their own - sl.common, sl.nis, sl.pcl - are declared here
+                // too. They matter for an install recipe, not for a runtime
+                // candidate, so they are skipped rather than guessed at.
+                continue;
+            };
+
+            // In the package directory under its real name, or at the
+            // component path under the stored name. Both layouts occur.
+            let direct = files.join(&row.real_name);
+            let indirect = stem.as_ref().map(|stem| {
+                let mut name = stem.clone();
+                name.push(&row.stored_ext);
+                root.join(&row.component)
+                    .join("versions")
+                    .join(&version_key)
+                    .join("files")
+                    .join(name)
+            });
+            let path = [Some(direct), indirect]
+                .into_iter()
+                .flatten()
+                .find(|path| path.is_file());
+            let Some(path) = path else { continue };
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+
+            found.push(Candidate {
+                // Declared, not read. See the note above.
+                version: Some(row.version),
+                file_name: row.real_name,
+                feature,
+                size: meta.len(),
+                origin: Origin::Driver,
+                path,
+            });
+        }
+    }
+    found.sort_by(|left, right| left.path.cmp(&right.path));
+    found.dedup_by(|left, right| left.path == right.path);
+    found
+}
+
+fn ngx_store_root() -> Option<PathBuf> {
+    let base = std::env::var("ProgramData").ok()?;
+    let root = Path::new(&base).join("NVIDIA").join("NGX").join("models");
+    root.is_dir().then_some(root)
+}
+
+/// Every `nvngx_package_config.txt` under the store.
+///
+/// The nesting is fixed at four levels
+/// (`<component>/versions/<key>/files/<prefix>_<app>`), so this walks to that
+/// depth rather than recursing the whole tree - which would otherwise mean
+/// stepping through several gigabytes of model directories to find text files.
+fn package_configs(root: &Path) -> Vec<PathBuf> {
+    const CONFIG: &str = "nvngx_package_config.txt";
+    let children = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut found = Vec::new();
+    for component in children(root) {
+        for key in children(&component.join("versions")) {
+            for package in children(&key.join("files")) {
+                let config = package.join(CONFIG);
+                if config.is_file() {
+                    found.push(config);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// One row of a package config.
+struct PackageRow {
+    component: String,
+    version: String,
+    stored_ext: String,
+    real_name: String,
+}
+
+impl PackageRow {
+    fn parse(row: &str) -> Option<PackageRow> {
+        let mut fields = row.split(',').map(str::trim);
+        let component = fields.next()?;
+        let version = fields.next()?;
+        let stored_ext = fields.next()?;
+        let real_name = fields.next()?;
+        // Four fields exactly. A row with more is a format this does not
+        // understand, and reading the first four of it would be a guess.
+        if fields.next().is_some() || component.is_empty() || real_name.is_empty() {
+            return None;
+        }
+        // The name is used to build a path, so anything that could escape the
+        // store is refused rather than sanitised.
+        if real_name.contains(['/', '\\', ':']) || real_name.starts_with('.') {
+            return None;
+        }
+        Some(PackageRow {
+            component: component.to_owned(),
+            version: version.to_owned(),
+            stored_ext: stored_ext.to_owned(),
+            real_name: real_name.to_owned(),
+        })
+    }
 }
 
 /// Runtimes a game has beside its executable.
@@ -270,6 +473,56 @@ fn version_of(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::scan::folder::RuntimeKind;
+
+    #[test]
+    fn a_package_row_needs_exactly_four_fields() {
+        let row = PackageRow::parse("dlss, 310.7.129, .bin, nvngx_dlss.dll").expect("four fields");
+        assert_eq!(row.component, "dlss");
+        assert_eq!(row.version, "310.7.129");
+        assert_eq!(row.stored_ext, ".bin");
+        assert_eq!(row.real_name, "nvngx_dlss.dll");
+
+        // The Streamline rows use the same shape.
+        let plugin = PackageRow::parse("sl_common_0, 2.14.0, .dll, sl.common.dll").expect("plugin");
+        assert_eq!(plugin.real_name, "sl.common.dll");
+
+        // Anything else is a format this does not understand. Reading the
+        // first four fields of a five-field row would be a guess about a
+        // format change, and the cost of guessing is a wrong install.
+        assert!(PackageRow::parse("dlss, 310.7.129, .bin").is_none());
+        assert!(PackageRow::parse("dlss, 310.7.129, .bin, a.dll, extra").is_none());
+        assert!(PackageRow::parse("").is_none());
+        assert!(PackageRow::parse("# a comment").is_none());
+    }
+
+    #[test]
+    fn a_package_row_cannot_name_a_path_outside_the_store() {
+        // The declared name is joined onto a directory, so a row that walks
+        // out of the store has to be refused rather than cleaned up: the file
+        // it points at would be installed into a game folder under a name we
+        // chose to trust.
+        for hostile in [
+            "dlss, 1, .bin, ..\\..\\..\\Windows\\System32\\evil.dll",
+            "dlss, 1, .bin, ../../evil.dll",
+            "dlss, 1, .bin, C:\\Windows\\System32\\evil.dll",
+            "dlss, 1, .bin, .hidden",
+        ] {
+            assert!(PackageRow::parse(hostile).is_none(), "{hostile}");
+        }
+    }
+
+    #[test]
+    fn the_ngx_store_is_absent_without_error() {
+        // Every discovery source has to be safe to call on a machine that
+        // does not have it - an AMD box, or a fresh install. Reporting
+        // nothing is the answer; failing is not.
+        let found = from_ngx_store();
+        for candidate in &found {
+            assert_eq!(candidate.origin, Origin::Driver);
+            assert!(candidate.size > 0, "{candidate:?}");
+            assert!(candidate.version.is_some(), "{candidate:?}");
+        }
+    }
 
     fn runtime(rel: &str, version: &str, provenance: Provenance) -> RuntimeFile {
         RuntimeFile {

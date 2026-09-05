@@ -17,6 +17,11 @@ use std::sync::Mutex;
 
 fn main() {
     let mut all = discover::from_driver_store();
+    let from_repository = all.len();
+    // The driver's NGX model store, which is where the runtimes it serves for
+    // its own DLSS Override actually live.
+    all.extend(discover::from_ngx_store());
+    let from_ngx = all.len() - from_repository;
     let from_driver = all.len();
 
     let games = library::discover(&platform::roots());
@@ -33,7 +38,8 @@ fn main() {
     let from_games = all.len() - from_driver;
 
     println!(
-        "searched the driver store and {} game(s): {from_driver} + {from_games} runtime file(s)",
+        "searched the driver ({from_repository} in the driver store, {from_ngx} in the NGX \
+         store) and {} game(s): {from_driver} + {from_games} runtime file(s)",
         games.len()
     );
 

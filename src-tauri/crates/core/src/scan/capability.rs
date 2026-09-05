@@ -229,17 +229,18 @@ impl Feature {
     }
 
     /// Which feature a runtime filename implements.
+    /// The feature a *runtime* file implements.
+    ///
+    /// Deliberately only `nvngx_*.dll`. This answers "installing this file
+    /// provides that feature", so it has to stay narrow: a Streamline plugin
+    /// is 400 KB of brokering and the runtime it brokers is 70 MB of model
+    /// weights, and a moment of treating the two alike had the installer
+    /// offering to write `sl.dlss.dll` into a game as `nvngx_dlss.dll`.
+    ///
+    /// For the different question - "does this game ask for that feature" -
+    /// see [`Feature::from_streamline_plugin`].
     pub fn from_runtime(file_name: &str) -> Option<Feature> {
         let lower = file_name.to_ascii_lowercase();
-        // The Streamline plugin is the stronger signal and is checked first.
-        // `nvngx_*.dll` is the model the plugin loads, and it can sit in a
-        // folder for all sorts of reasons; `sl.dlss_nr.dll` is there because
-        // the game was built to ask Streamline for feature 1004.
-        for feature in Feature::ALL {
-            if lower == feature.streamline_plugin().0 {
-                return Some(feature);
-            }
-        }
         // Longest first: `nvngx_dlssd` and `nvngx_dlssg` both start with
         // `nvngx_dlss`, so the plain upscaler has to be tested last.
         for (needle, feature) in [
@@ -253,6 +254,22 @@ impl Feature {
             }
         }
         None
+    }
+
+    /// The feature a *Streamline plugin* requests.
+    ///
+    /// The stronger evidence of the two for what a game does, and the weaker
+    /// for what a file provides. `sl.dlss_nr.dll` is in a folder because the
+    /// game was built to ask Streamline for feature 1004; `nvngx_dlssnr.dll`
+    /// is in a folder for any number of reasons, hand-copying included.
+    ///
+    /// `sl.common.dll`, `sl.reflex.dll`, `sl.pcl.dll` and `sl.nis.dll` are not
+    /// features of their own and return `None`.
+    pub fn from_streamline_plugin(file_name: &str) -> Option<Feature> {
+        let lower = file_name.to_ascii_lowercase();
+        Feature::ALL
+            .into_iter()
+            .find(|feature| lower == feature.streamline_plugin().0)
     }
 
     /// Which features the *game itself* feeds, from the runtime files beside
@@ -276,7 +293,10 @@ impl Feature {
             .filter(|file| file.provenance == Provenance::ConsistentWithSiblings)
             .filter_map(|file| {
                 let name = file.rel.rsplit(['/', '\\']).next().unwrap_or("");
-                Feature::from_runtime(name)
+                // Either kind of evidence that the game drives this feature:
+                // the plugin it links to request it, or the runtime that
+                // plugin loads.
+                Feature::from_streamline_plugin(name).or_else(|| Feature::from_runtime(name))
             })
             .collect();
         found.sort_unstable();
@@ -774,20 +794,27 @@ mod tests {
         // copied into folders by hand all the time. So the plugin name has to
         // resolve, and it has to resolve to the same feature.
         assert_eq!(
-            Feature::from_runtime("sl.dlss_nr.dll"),
+            Feature::from_streamline_plugin("sl.dlss_nr.dll"),
             Some(Feature::NeuralRendering)
         );
         assert_eq!(
-            Feature::from_runtime("sl.dlss_g.dll"),
+            Feature::from_streamline_plugin("sl.dlss_g.dll"),
             Some(Feature::FrameGeneration)
         );
         assert_eq!(
-            Feature::from_runtime("sl.dlss.dll"),
+            Feature::from_streamline_plugin("sl.dlss.dll"),
             Some(Feature::SuperResolution)
         );
         // `sl.common.dll` and `sl.reflex.dll` are not features of their own.
-        assert_eq!(Feature::from_runtime("sl.common.dll"), None);
-        assert_eq!(Feature::from_runtime("sl.reflex.dll"), None);
+        assert_eq!(Feature::from_streamline_plugin("sl.common.dll"), None);
+        assert_eq!(Feature::from_streamline_plugin("sl.reflex.dll"), None);
+
+        // And the two lookups must not bleed into each other. A plugin is not
+        // a runtime: offering `sl.dlss.dll` as something to install as
+        // `nvngx_dlss.dll` would write 400 KB of brokering over a 70 MB model.
+        assert_eq!(Feature::from_runtime("sl.dlss.dll"), None);
+        assert_eq!(Feature::from_runtime("sl.dlss_nr.dll"), None);
+        assert_eq!(Feature::from_streamline_plugin("nvngx_dlss.dll"), None);
     }
 
     #[test]
@@ -1074,13 +1101,7 @@ mod tests {
             Feature::from_runtime("NVNGX_DLSSNR.DLL"),
             Some(Feature::NeuralRendering)
         );
-        // `sl.dlss.dll` used to be rejected here. It is now recognised, and
-        // deliberately: it is the plugin the game links to request feature 0,
-        // which is better evidence than the model file beside it.
-        assert_eq!(
-            Feature::from_runtime("sl.dlss.dll"),
-            Some(Feature::SuperResolution)
-        );
+        assert_eq!(Feature::from_runtime("sl.dlss.dll"), None);
         assert_eq!(Feature::from_runtime("d3d12.dll"), None);
     }
 
