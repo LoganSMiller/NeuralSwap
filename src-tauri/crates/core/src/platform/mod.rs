@@ -4,6 +4,7 @@
 //! everything else takes paths as arguments, and only this decides what those
 //! paths are on a real machine.
 
+pub mod driver_profile;
 pub mod gpu;
 use std::path::PathBuf;
 

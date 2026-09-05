@@ -31,7 +31,12 @@ sha2 = "0.10"
 windows-registry = "0.6"
 # Free space on the volume a game lives on, for the preflight check. Already
 # in the dependency graph via Tauri, so naming it directly costs no new crate.
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    # nvapi64.dll is loaded by name and resolved through its one export, so
+    # reading NVIDIA driver profiles needs the loader rather than a binding.
+    "Win32_System_LibraryLoader",
+] }
 
 [dev-dependencies]
 tempfile = "3"
