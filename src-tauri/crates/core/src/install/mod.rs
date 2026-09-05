@@ -32,6 +32,7 @@ pub mod discover;
 pub mod journal;
 pub mod manifest;
 pub mod package;
+pub mod placement;
 pub mod plan;
 pub mod preflight;
 pub mod recipe;

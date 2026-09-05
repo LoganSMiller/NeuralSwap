@@ -9,13 +9,22 @@
 use std::sync::Mutex;
 
 use neuralswap_core::components::catalog::default_catalog;
-use neuralswap_core::install::recipe;
+use neuralswap_core::install::{placement, recipe};
 use neuralswap_core::jobs::Cancel;
 use neuralswap_core::pe::PeCache;
 use neuralswap_core::scan::capability::Feature;
 use neuralswap_core::scan::integration::assess;
 use neuralswap_core::scan::scan_folder;
 use neuralswap_core::{library, platform};
+
+/// Display helper: an empty directory is the game root.
+fn at(dir: &str) -> String {
+    if dir.is_empty() {
+        "<game root>".to_owned()
+    } else {
+        dir.to_owned()
+    }
+}
 
 fn main() {
     let catalog = default_catalog();
@@ -41,6 +50,13 @@ fn main() {
             .map(|entry| entry.file_name().to_string_lossy().to_lowercase())
             .collect();
         let has_native_dlss = beside.iter().any(|name| name.starts_with("nvngx"));
+        // Where the runtime loads from: the executable's own directory.
+        let install_dir = candidate
+            .rel
+            .replace('\\', "/")
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_owned())
+            .unwrap_or_default();
 
         let found = assess(&imports, &beside, has_native_dlss);
         // The footprint survey is of the directory the runtime goes into,
@@ -98,6 +114,40 @@ fn main() {
                 "  CLASH   {:?} vs {} - {}",
                 clash.tool, clash.with, clash.reason
             );
+        }
+        for item in placement::plan(
+            &catalog,
+            &built,
+            &install_dir,
+            candidate.api.as_ref().map(|v| v.api),
+        ) {
+            match &item.delivery {
+                placement::Delivery::Proxy { dir, as_name, from } => {
+                    println!(
+                        "  place   {:<22} {}/{as_name}  (renamed from {from})",
+                        item.component,
+                        at(dir)
+                    )
+                }
+                placement::Delivery::VulkanLayer {
+                    dir,
+                    manifest,
+                    layer,
+                } => println!(
+                    "  place   {:<22} {}/  as Vulkan layer {layer} via {manifest}",
+                    item.component,
+                    at(dir)
+                ),
+                placement::Delivery::Copy { dir } => {
+                    println!("  place   {:<22} {}/", item.component, at(dir))
+                }
+                placement::Delivery::ByHand { dir, from, files } => println!(
+                    "  BY HAND {:<22} {}/  get from {from}: {}",
+                    item.component,
+                    at(dir),
+                    files.join(", ")
+                ),
+            }
         }
         println!("  runnable: {}", built.is_runnable());
     }
