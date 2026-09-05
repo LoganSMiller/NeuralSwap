@@ -362,11 +362,20 @@ fn resolve(catalog: &Catalog, roots: &[(String, String)], survey: &Survey) -> Ve
         }
     }
 
-    // What the folder already has, in catalogue terms.
+    // What the folder already has, in catalogue terms - and only what is
+    // actually going to load.
+    //
+    // Presence is not enough for an injector. A folder can hold every file
+    // ReShade ever wrote and still not load it, because something else took
+    // the proxy slot; Ready or Not on the development machine is exactly
+    // that. Marking those leftovers as a satisfied dependency would skip the
+    // injector and produce an install where the add-on never loads.
     let present: BTreeSet<&str> = survey
         .tools
         .iter()
-        .filter_map(|found| found.tool.component_id())
+        .map(|found| found.tool)
+        .filter(|tool| survey.is_loading(*tool))
+        .filter_map(Tool::component_id)
         .collect();
 
     // Kahn, over the sub-graph we actually selected.
@@ -447,6 +456,48 @@ fn clashes_with_disk(catalog: &Catalog, steps: &[Step], survey: &Survey) -> Vec<
             }
         }
     }
+    // The proxy slot, which is a conflict the catalogue cannot express.
+    //
+    // There is one `dxgi.dll` per folder. Two injectors both want to be it,
+    // and the second either loses or overwrites the first - so an install
+    // that adds an injector while a different one holds the slot is a clash
+    // however few edges the catalogue draws between them. ReShade and
+    // OptiScaler have no `conflicts_with` entry against each other, because
+    // in principle they coexist; in one folder, contending for one filename,
+    // they do not.
+    if let Some(slot) = &survey.proxy {
+        if let Some(owner) = slot.owner {
+            for step in steps {
+                if step.already_present {
+                    continue;
+                }
+                let Some(component) = catalog.get(&step.component) else {
+                    continue;
+                };
+                // Only an injector contends for the slot, and only a
+                // *different* one is a problem.
+                let ours_injects = matches!(component.role, Role::Injector | Role::Loader)
+                    || component.id == "optiscaler";
+                if !ours_injects || owner.component_id() == Some(component.id.as_str()) {
+                    continue;
+                }
+                let name = catalog
+                    .get(owner.component_id().unwrap_or_default())
+                    .map_or_else(|| format!("{owner:?}"), |other| other.name.clone());
+                found.push(Clash {
+                    tool: owner,
+                    with: step.component.clone(),
+                    reason: format!(
+                        "{name} already holds {} in this folder, and there is only one of it. \
+                         Installing {} would take that name over, so one of the two would stop \
+                         loading - with no error either way.",
+                        slot.file, component.name
+                    ),
+                });
+            }
+        }
+    }
+
     found.sort_by(|left, right| {
         (left.with.as_str(), left.tool as u8).cmp(&(right.with.as_str(), right.tool as u8))
     });
@@ -464,16 +515,35 @@ mod tests {
         Survey {
             tools: Vec::new(),
             displaced: Vec::new(),
+            proxy: None,
         }
     }
 
-    fn with_tool(tool: Tool) -> Survey {
+    /// A tool that is present but not loading: its files are there, something
+    /// else holds the proxy slot.
+    fn leftovers_of(tool: Tool) -> Survey {
         Survey {
             tools: vec![Footprint {
                 tool,
                 evidence: "test".to_owned(),
             }],
             displaced: Vec::new(),
+            proxy: None,
+        }
+    }
+
+    /// A tool that is present *and* holds the loading slot.
+    fn loading(tool: Tool) -> Survey {
+        Survey {
+            tools: vec![Footprint {
+                tool,
+                evidence: "test".to_owned(),
+            }],
+            displaced: Vec::new(),
+            proxy: Some(crate::scan::footprints::ProxySlot {
+                file: "dxgi.dll".to_owned(),
+                owner: Some(tool),
+            }),
         }
     }
 
@@ -591,7 +661,7 @@ mod tests {
             &[Feature::NeuralRendering],
             Integration::None,
             &[],
-            &with_tool(Tool::ReShade),
+            &loading(Tool::ReShade),
             Some(Generation::Blackwell),
         );
 
@@ -616,6 +686,41 @@ mod tests {
     }
 
     #[test]
+    fn leftover_reshade_files_do_not_satisfy_the_injector() {
+        // Ready or Not on the development machine: `reshade-shaders/` is
+        // there, `OptiScaler.ini` is there, and the single `dxgi.dll` is
+        // OptiScaler - 65 mentions of it against 6 of ReShade. ReShade is not
+        // loading in that game; what is left of it is a shader folder.
+        //
+        // Treating that as a satisfied dependency skips the injector, and the
+        // add-on that needed it never loads. The install would report success.
+        let catalog = default_catalog();
+        let recipe = build(
+            &catalog,
+            Route::Feeder,
+            &[Feature::NeuralRendering],
+            Integration::None,
+            &[],
+            &leftovers_of(Tool::ReShade),
+            Some(Generation::Blackwell),
+        );
+
+        let reshade = recipe
+            .steps
+            .iter()
+            .find(|step| step.component == "reshade")
+            .expect("listed");
+        assert!(
+            !reshade.already_present,
+            "leftovers were mistaken for a working install: {recipe:#?}"
+        );
+        assert!(recipe
+            .to_install()
+            .iter()
+            .any(|step| step.component == "reshade"));
+    }
+
+    #[test]
     fn optiscaler_already_installed_is_reported_as_a_clash() {
         // OptiScaler left enabled breaks the Feeder route, and the failure is
         // silent. The user has to be told before the install, not after.
@@ -626,7 +731,7 @@ mod tests {
             &[Feature::NeuralRendering],
             Integration::None,
             &[],
-            &with_tool(Tool::OptiScaler),
+            &loading(Tool::OptiScaler),
             Some(Generation::Blackwell),
         );
 
@@ -641,6 +746,54 @@ mod tests {
         // the recipe is not runnable as it stands.
         assert!(!recipe.steps.is_empty());
         assert!(!recipe.is_runnable(), "{recipe:#?}");
+    }
+
+    #[test]
+    fn two_injectors_contending_for_one_filename_is_a_clash() {
+        // The catalogue draws no edge between ReShade and OptiScaler, because
+        // in principle they coexist. In one folder, contending for one
+        // `dxgi.dll`, they do not - and Ready or Not on the development
+        // machine is exactly that: both installed, OptiScaler holding the
+        // slot, ReShade inert.
+        let catalog = default_catalog();
+        let recipe = build(
+            &catalog,
+            Route::Bridge,
+            &[Feature::NeuralRendering],
+            Integration::None,
+            &[Feature::RayReconstruction],
+            &loading(Tool::OptiScaler),
+            Some(Generation::Blackwell),
+        );
+
+        let clash = recipe
+            .clashes
+            .iter()
+            .find(|clash| clash.with == "reshade")
+            .expect("the proxy slot clash");
+        assert_eq!(clash.tool, Tool::OptiScaler);
+        assert!(clash.reason.contains("dxgi.dll"), "{}", clash.reason);
+        assert!(clash.reason.contains("only one"), "{}", clash.reason);
+        assert!(!recipe.is_runnable());
+    }
+
+    #[test]
+    fn the_injector_we_want_already_holding_the_slot_is_not_a_clash() {
+        // The same check must not fire against ourselves. A folder where
+        // ReShade already owns `dxgi.dll` is the good case, not a conflict.
+        let catalog = default_catalog();
+        let recipe = build(
+            &catalog,
+            Route::Feeder,
+            &[Feature::NeuralRendering],
+            Integration::None,
+            &[],
+            &loading(Tool::ReShade),
+            Some(Generation::Blackwell),
+        );
+
+        assert!(recipe.clashes.is_empty(), "{recipe:#?}");
+        assert!(recipe.is_runnable(), "{recipe:#?}");
     }
 
     #[test]

@@ -64,6 +64,15 @@ fn main() {
         );
 
         println!("\n{} - {:?} via {:?}", game.name, found.integration, route);
+        match &survey.proxy {
+            Some(slot) => println!("  proxy slot: {} owned by {:?}", slot.file, slot.owner),
+            None => println!("  proxy slot: free"),
+        }
+        for tool in survey.tools_present() {
+            if survey.is_leftovers(tool) {
+                println!("  leftovers:  {tool:?} is present but not loading");
+            }
+        }
         if built.steps.is_empty() {
             println!("  nothing to install");
         }

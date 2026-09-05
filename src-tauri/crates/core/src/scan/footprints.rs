@@ -84,6 +84,23 @@ impl Tool {
 }
 
 impl Tool {
+    /// Whether this tool gets loaded by taking the name of a system DLL.
+    ///
+    /// The ones that do contend for a single slot per folder, so for them
+    /// "installed" and "loading" are different questions. The ones that do
+    /// not - a runtime the game asks for by name, a shader folder something
+    /// else reads - are simply there or not.
+    pub const fn loads_by_proxy(self) -> bool {
+        matches!(
+            self,
+            Tool::ReShade
+                | Tool::OptiScaler
+                | Tool::UltimateAsiLoader
+                | Tool::DgVoodoo
+                | Tool::RtxRemix
+        )
+    }
+
     /// The catalogue entry this detected tool corresponds to, when there is
     /// one.
     ///
@@ -137,6 +154,30 @@ pub struct Survey {
     pub tools: Vec<Footprint>,
     /// Files another tool replaced, each with the original it kept.
     pub displaced: Vec<Displaced>,
+    /// The injector that currently owns a proxy DLL slot, and which file.
+    ///
+    /// The decisive fact about an injector, and a different question from
+    /// whether one has ever been here. Ready or Not on the development
+    /// machine has `reshade-shaders/` **and** `OptiScaler.ini` **and** a
+    /// single `dxgi.dll` - and that `dxgi.dll` is OptiScaler. ReShade is not
+    /// loading in that game; what is left of it is a shader folder.
+    ///
+    /// Treating the leftovers as a working install is how a tool decides an
+    /// add-on's dependency is already satisfied, skips it, and produces an
+    /// install where nothing loads.
+    pub proxy: Option<ProxySlot>,
+}
+
+/// Who owns the loading slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxySlot {
+    /// The file taking the name, e.g. `dxgi.dll`.
+    pub file: String,
+    /// The tool it turned out to be, when it could be identified. `None`
+    /// means something is in the slot that we do not recognise - which is
+    /// still decisive, because the slot is taken.
+    pub owner: Option<Tool>,
 }
 
 impl Survey {
@@ -155,6 +196,35 @@ impl Survey {
         found.sort_unstable();
         found.dedup();
         found
+    }
+
+    /// Whether `tool` is actually in a position to load.
+    ///
+    /// For an injector this is the only question that matters, and it is not
+    /// the same as being present. A folder can hold every file ReShade ever
+    /// wrote and still not load it, because something else took the proxy
+    /// slot.
+    ///
+    /// A tool that does not work by proxy - a runtime, a shader pack - is
+    /// answered by presence, since there is no slot to contend for.
+    pub fn is_loading(&self, tool: Tool) -> bool {
+        if !tool.loads_by_proxy() {
+            return self.tools.iter().any(|found| found.tool == tool);
+        }
+        self.proxy
+            .as_ref()
+            .is_some_and(|slot| slot.owner == Some(tool))
+    }
+
+    /// Present, but not in a position to do anything.
+    ///
+    /// Worth reporting on its own: it is the difference between "you already
+    /// have this" and "you have the remains of this", and a user who is told
+    /// the first will not understand why nothing happened.
+    pub fn is_leftovers(&self, tool: Tool) -> bool {
+        tool.loads_by_proxy()
+            && self.tools.iter().any(|found| found.tool == tool)
+            && !self.is_loading(tool)
     }
 }
 
@@ -188,6 +258,42 @@ const BY_NAME: [(&str, Tool); 19] = [
 ];
 
 /// Directory names that identify a tool.
+/// The file names an injector can take to get itself loaded.
+///
+/// Windows resolves a DLL beside the executable before the system copy, so a
+/// library named after one the game already imports is loaded in its place and
+/// forwards the real calls on. That is how ReShade, OptiScaler and Ultimate
+/// ASI Loader all get in.
+///
+/// It is also why they collide. There is one `dxgi.dll` slot per folder, and
+/// the second tool to want it either loses or overwrites the first. Ordered
+/// most-likely first, which is roughly how common the API is.
+pub const PROXY_NAMES: &[&str] = &[
+    "dxgi.dll",
+    "d3d11.dll",
+    "d3d12.dll",
+    "d3d9.dll",
+    "opengl32.dll",
+    "winmm.dll",
+    "version.dll",
+    "dinput8.dll",
+    "dbghelp.dll",
+];
+
+/// Byte sequences that name the owner of a proxy DLL.
+///
+/// Checked in order, and the counts matter rather than mere presence:
+/// OptiScaler's own binary mentions ReShade a handful of times because it
+/// implements part of that add-on interface, so "contains ReShade" would
+/// misattribute it. Measured on a real install, `dxgi.dll` in a folder with
+/// both had 65 hits for OptiScaler against 6 for ReShade.
+const PROXY_OWNERS: [(&str, Tool); 4] = [
+    ("OptiScaler", Tool::OptiScaler),
+    ("ReShade", Tool::ReShade),
+    ("Ultimate ASI Loader", Tool::UltimateAsiLoader),
+    ("dgVoodoo", Tool::DgVoodoo),
+];
+
 const BY_DIRECTORY: [(&str, Tool); 5] = [
     ("_dlss5_backup", Tool::Dlss5Swapper),
     ("reshade-shaders", Tool::ReShade),
@@ -230,6 +336,17 @@ pub fn survey(directory: &Path) -> Survey {
     let present: BTreeSet<&str> = names.iter().map(|(lower, _, _)| lower.as_str()).collect();
     let mut tools: Vec<Footprint> = Vec::new();
     let mut displaced: Vec<Displaced> = Vec::new();
+
+    // Who holds the loading slot. Done first so the rest of the survey can be
+    // read against it: everything else here is evidence that a tool has been
+    // in this folder, and this is the one fact about whether it still works.
+    let proxy = PROXY_NAMES
+        .iter()
+        .find(|name| present.contains(**name))
+        .map(|name| ProxySlot {
+            file: (*name).to_owned(),
+            owner: identify_proxy(&directory.join(name)),
+        });
 
     for (lower, original, is_dir) in &names {
         if *is_dir {
@@ -293,7 +410,42 @@ pub fn survey(directory: &Path) -> Survey {
     displaced.sort_by(|left, right| left.file.cmp(&right.file));
     displaced.dedup();
 
-    Survey { tools, displaced }
+    Survey {
+        tools,
+        displaced,
+        proxy,
+    }
+}
+
+/// Which tool a proxy DLL turned out to be.
+///
+/// Counted rather than merely found. OptiScaler implements part of ReShade's
+/// add-on interface and so carries the string; measured on a real install, its
+/// `dxgi.dll` had 65 occurrences of `OptiScaler` against 6 of `ReShade`, and a
+/// first-match rule that happened to check ReShade first would have named the
+/// wrong owner.
+///
+/// A file we cannot read, or read and do not recognise, gives `None` - the
+/// slot is still taken, which is the part that matters.
+fn identify_proxy(path: &Path) -> Option<Tool> {
+    // These are DLLs, not model blobs. A cap keeps a folder with something
+    // enormous sitting under a proxy name from turning a scan into a read of
+    // the whole file, and 64 MiB is far past any real injector.
+    const MOST: u64 = 64 * 1024 * 1024;
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MOST) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+
+    PROXY_OWNERS
+        .iter()
+        .map(|(needle, tool)| {
+            let hits = memchr::memmem::find_iter(&bytes, needle.as_bytes()).count();
+            (hits, *tool)
+        })
+        .filter(|(hits, _)| *hits > 0)
+        .max_by_key(|(hits, _)| *hits)
+        .map(|(_, tool)| tool)
 }
 
 #[cfg(test)]
@@ -309,6 +461,80 @@ mod tests {
             std::fs::create_dir_all(dir.path().join(name)).expect("dir");
         }
         dir
+    }
+
+    /// A folder whose proxy DLL carries the given marker counts.
+    fn with_proxy(name: &str, markers: &[(&str, usize)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut body = Vec::new();
+        for (needle, times) in markers {
+            for _ in 0..*times {
+                body.extend_from_slice(needle.as_bytes());
+                body.push(0);
+            }
+        }
+        std::fs::write(dir.path().join(name), &body).expect("write");
+        dir
+    }
+
+    #[test]
+    fn the_proxy_slot_owner_is_decided_by_count_not_by_presence() {
+        // Measured on a real install: OptiScaler's `dxgi.dll` mentions
+        // ReShade six times, because it implements part of that add-on
+        // interface, against sixty-five mentions of itself. A
+        // "contains ReShade" rule names the wrong owner, and the consequence
+        // is telling a user their ReShade is working when it is inert.
+        let dir = with_proxy("dxgi.dll", &[("ReShade", 6), ("OptiScaler", 65)]);
+        let survey = survey(dir.path());
+
+        let slot = survey.proxy.as_ref().expect("a slot");
+        assert_eq!(slot.file, "dxgi.dll");
+        assert_eq!(slot.owner, Some(Tool::OptiScaler));
+        assert!(survey.is_loading(Tool::OptiScaler));
+        assert!(!survey.is_loading(Tool::ReShade));
+    }
+
+    #[test]
+    fn leftovers_are_present_but_not_loading() {
+        // The Ready or Not case: a `reshade-shaders/` folder and an
+        // OptiScaler proxy. ReShade has been here; ReShade is not running.
+        let dir = with_proxy("dxgi.dll", &[("OptiScaler", 20)]);
+        std::fs::create_dir_all(dir.path().join("reshade-shaders")).expect("dir");
+        let survey = survey(dir.path());
+
+        assert!(survey.tools_present().contains(&Tool::ReShade));
+        assert!(!survey.is_loading(Tool::ReShade));
+        assert!(survey.is_leftovers(Tool::ReShade));
+        // And the tool that does hold the slot is not "leftovers".
+        assert!(!survey.is_leftovers(Tool::OptiScaler));
+    }
+
+    #[test]
+    fn an_unrecognised_proxy_still_counts_as_taking_the_slot() {
+        // Something is in the slot. We cannot say what, and it does not
+        // matter: the name is taken, so an injector we install would have to
+        // displace it.
+        let dir = with_proxy("d3d11.dll", &[("something else entirely", 3)]);
+        let survey = survey(dir.path());
+
+        let slot = survey.proxy.as_ref().expect("a slot");
+        assert_eq!(slot.file, "d3d11.dll");
+        assert_eq!(slot.owner, None);
+    }
+
+    #[test]
+    fn a_folder_with_no_proxy_dll_has_a_free_slot() {
+        let dir = folder(&["Game.exe", "nvngx_dlss.dll"], &[]);
+        assert!(survey(dir.path()).proxy.is_none());
+    }
+
+    #[test]
+    fn a_runtime_is_judged_by_presence_because_it_contends_for_nothing() {
+        // Only the proxy-loaded tools have a slot to lose. A runtime the game
+        // asks for by name either exists or does not.
+        assert!(!Tool::Dlss5Swapper.loads_by_proxy());
+        assert!(Tool::ReShade.loads_by_proxy());
+        assert!(Tool::OptiScaler.loads_by_proxy());
     }
 
     #[test]
