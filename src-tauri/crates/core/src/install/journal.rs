@@ -73,6 +73,22 @@ pub struct JournalRecord {
     pub route: Route,
     pub created_at: i64,
     pub steps: Vec<JournalStep>,
+    /// Directories that did not exist before this install, innermost first,
+    /// relative to the game folder.
+    ///
+    /// Writing a file creates its parents as a side effect. Without this an
+    /// undo removes the files and leaves the folders, so a failed install has
+    /// still changed the game - which it must not have.
+    ///
+    /// Recorded here rather than captured as each write happens, because this
+    /// journal states its whole intent before it touches anything. The
+    /// directories are worked out from the resolved targets, at the same point
+    /// as everything else.
+    ///
+    /// Rollback removes them with `remove_dir`, never `remove_dir_all`: if
+    /// something else has since been put inside one, it is not ours to delete.
+    #[serde(default)]
+    pub created_dirs: Vec<String>,
 }
 
 /// An open journal. Dropping this does **not** clean up: an abandoned journal
@@ -363,6 +379,25 @@ fn roll_back(found: &Survey, outcome: &mut RecoveryOutcome) {
     }
 
     if outcome.failures.is_empty() {
+        // Directories this install brought into being, innermost first.
+        //
+        // `remove_dir`, never `remove_dir_all`: it fails on a directory that
+        // is not empty, and that failure is the correct outcome. If something
+        // else has been put inside one since - a user's own shader, another
+        // tool's file - it is not ours to delete, and a silent recursive
+        // delete inside somebody's game folder is the worst thing this code
+        // could do.
+        //
+        // A failure to remove is therefore not reported as an install
+        // failure. The files are back; an empty folder left behind because it
+        // is no longer empty is not a fault.
+        for dir in &record.created_dirs {
+            let path = record.game_dir.join(dir.replace('\\', "/"));
+            if fs::remove_dir(&path).is_ok() {
+                outcome.removed.push(dir.clone());
+            }
+        }
+
         // The originals are back where they belong, so the copies are spare.
         for step in record.steps.iter().take(applied) {
             if let Some(backup) = step.backup.as_ref() {
@@ -478,6 +513,7 @@ mod tests {
             route: Route::NativeDll,
             created_at: 0,
             steps,
+            created_dirs: Vec::new(),
         }
     }
 
@@ -610,6 +646,104 @@ mod tests {
         let outcomes = recover_all(&journals).expect("recover");
         assert_eq!(outcomes[0].removed, vec!["sl.dlss_g.dll"]);
         assert!(!target.exists());
+    }
+
+    /// A record naming directories the install brought into being.
+    fn record_with_dirs(dir: &Path, steps: Vec<JournalStep>, dirs: &[&str]) -> JournalRecord {
+        let mut built = record(dir, steps);
+        built.created_dirs = dirs.iter().map(|item| (*item).to_owned()).collect();
+        built
+    }
+
+    #[test]
+    fn a_rollback_removes_the_directories_the_install_created() {
+        // Files were always put back; the folders holding them were not. An
+        // empty `reshade-shaders/` left in somebody's game folder is still a
+        // change they did not ask for, and "the install failed" is not a
+        // licence to leave litter.
+        let root = tempfile::tempdir().expect("tempdir");
+        let journals = root.path().join("journal");
+        let game = root.path().join("game");
+        let deep = game.join("bin/x64/reshade-shaders/Shaders");
+        fs::create_dir_all(&deep).expect("dirs");
+        let target = deep.join("Motion.fx");
+        fs::write(&target, b"shader").expect("write");
+
+        let mut handle = Journal::begin(
+            &journals,
+            record_with_dirs(
+                &game,
+                vec![JournalStep {
+                    index: 0,
+                    rel: "bin/x64/reshade-shaders/Shaders/Motion.fx".to_owned(),
+                    action: StepAction::Create,
+                    expected_sha256: "x".to_owned(),
+                    expected_size: 6,
+                    backup: None,
+                    replaced_sha256: None,
+                }],
+                // Innermost first, as `dirs_to_create` produces them.
+                &["bin/x64/reshade-shaders/Shaders", "bin/x64/reshade-shaders"],
+            ),
+        )
+        .expect("begin");
+        handle.note_applied(0).expect("note");
+
+        let outcomes = recover_all(&journals).expect("recover");
+        assert!(outcomes[0].failures.is_empty(), "{:?}", outcomes[0]);
+        assert!(!target.exists(), "the file should be gone");
+        assert!(
+            !game.join("bin/x64/reshade-shaders").exists(),
+            "the directories the install created should be gone too"
+        );
+        // And the directory that was there before is untouched.
+        assert!(game.join("bin/x64").is_dir());
+    }
+
+    #[test]
+    fn a_created_directory_someone_else_has_filled_is_left_alone() {
+        // `remove_dir`, never `remove_dir_all`, and this is the difference.
+        // If a user has put their own shader in the folder since, an undo
+        // must leave it there. A silent recursive delete inside a game folder
+        // is the worst thing this code could do, and it would look exactly
+        // like tidiness.
+        let root = tempfile::tempdir().expect("tempdir");
+        let journals = root.path().join("journal");
+        let game = root.path().join("game");
+        let shaders = game.join("reshade-shaders");
+        fs::create_dir_all(&shaders).expect("dirs");
+        fs::write(shaders.join("ours.fx"), b"ours").expect("write");
+        fs::write(shaders.join("theirs.fx"), b"not ours").expect("write");
+
+        let mut handle = Journal::begin(
+            &journals,
+            record_with_dirs(
+                &game,
+                vec![JournalStep {
+                    index: 0,
+                    rel: "reshade-shaders/ours.fx".to_owned(),
+                    action: StepAction::Create,
+                    expected_sha256: "x".to_owned(),
+                    expected_size: 4,
+                    backup: None,
+                    replaced_sha256: None,
+                }],
+                &["reshade-shaders"],
+            ),
+        )
+        .expect("begin");
+        handle.note_applied(0).expect("note");
+
+        let outcomes = recover_all(&journals).expect("recover");
+        // Ours is gone; theirs is not; the directory survives because it is
+        // not empty. And none of that counts as a failure.
+        assert!(outcomes[0].failures.is_empty(), "{:?}", outcomes[0]);
+        assert!(!shaders.join("ours.fx").exists());
+        assert!(
+            shaders.join("theirs.fx").exists(),
+            "somebody else's file must survive an undo"
+        );
+        assert!(shaders.is_dir(), "a non-empty directory must survive");
     }
 
     #[test]

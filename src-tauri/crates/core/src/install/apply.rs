@@ -121,6 +121,49 @@ struct Resolved<'a> {
     replaced_version: Option<String>,
 }
 
+/// Directories that will have to be created for these targets, innermost
+/// first, relative to the game folder.
+///
+/// Worked out before anything is written, which is why this journal can state
+/// its whole intent up front. Innermost first because that is the order they
+/// have to be removed in - a parent cannot go until its children have.
+///
+/// Only directories strictly inside the game folder are listed. The game
+/// folder itself already exists, and anything above it is not ours.
+fn dirs_to_create(game_dir: &Path, resolved: &[Resolved<'_>]) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    let mut missing: BTreeSet<String> = BTreeSet::new();
+    for item in resolved {
+        let mut dir = item.target.parent();
+        while let Some(current) = dir {
+            if current == game_dir || current.exists() {
+                break;
+            }
+            let Ok(rel) = current.strip_prefix(game_dir) else {
+                break;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if rel.is_empty() {
+                break;
+            }
+            missing.insert(rel);
+            dir = current.parent();
+        }
+    }
+
+    // Deepest first, so removal can walk the list in order.
+    let mut ordered: Vec<String> = missing.into_iter().collect();
+    ordered.sort_by(|left, right| {
+        right
+            .matches('/')
+            .count()
+            .cmp(&left.matches('/').count())
+            .then_with(|| right.cmp(left))
+    });
+    ordered
+}
+
 pub fn apply(request: &Request<'_>) -> Result<Outcome> {
     let report = preflight::preflight(&preflight::Request {
         game_dir: request.game_dir,
@@ -164,6 +207,10 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
         }
     };
 
+    // Worked out here, from the resolved targets, while nothing has yet been
+    // written - so both undo paths know what to remove.
+    let created_dirs = dirs_to_create(request.game_dir, &resolved);
+
     // Intent first. After this line a crash is recoverable; before it, there
     // is nothing to recover because nothing has been touched.
     let record = JournalRecord {
@@ -185,6 +232,7 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
                 replaced_sha256: item.replaced_sha256.clone(),
             })
             .collect(),
+        created_dirs: created_dirs.clone(),
     };
     let mut journal = Journal::begin(request.journal_root, record)?;
 
@@ -194,7 +242,10 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
             // The manifest is written after the commit marker on purpose: a
             // manifest that claims an install which did not finish is worse
             // than no manifest, because it is what an uninstall trusts.
-            manifest::save(request.manifest_root, &built_manifest(request, &resolved))?;
+            manifest::save(
+                request.manifest_root,
+                &built_manifest(request, &resolved, created_dirs.clone()),
+            )?;
             journal.remove()?;
             Ok(Outcome::Installed(Applied {
                 journal_id: id,
@@ -376,8 +427,13 @@ fn write_all(
     Ok(installed)
 }
 
-fn built_manifest(request: &Request<'_>, resolved: &[Resolved<'_>]) -> InstallManifest {
+fn built_manifest(
+    request: &Request<'_>,
+    resolved: &[Resolved<'_>],
+    created_dirs: Vec<String>,
+) -> InstallManifest {
     InstallManifest {
+        created_dirs,
         version: manifest::MANIFEST_VERSION,
         game_dir: request.game_dir.to_path_buf(),
         route: request.plan.route,
@@ -763,6 +819,106 @@ mod tests {
             b"original a"
         );
         assert_eq!(bench.journals_left(), 0);
+    }
+
+    #[test]
+    fn created_directories_are_listed_innermost_first() {
+        // Removal walks the list in order, and a parent cannot go until its
+        // children have. Built from a real plan rather than a hand-made step,
+        // so the test cannot drift from what an install actually resolves.
+        let bench = bench();
+        let plan = build_plan(&PlanInput {
+            route: Route::NativeDll,
+            install_dir: "bin/x64/a/b/c".to_owned(),
+            present: vec![],
+            pkg: vec![bench.offer("file.dll", b"bytes")],
+        })
+        .expect("plan");
+
+        let resolved: Vec<Resolved<'_>> = plan
+            .steps
+            .iter()
+            .map(|step| Resolved {
+                step,
+                target: bench.game.join(step.rel.replace('\\', "/")),
+                source: bench.source.join("file.dll"),
+                backup: None,
+                replaced_sha256: None,
+                replaced_size: 0,
+                replaced_version: None,
+            })
+            .collect();
+
+        assert_eq!(
+            dirs_to_create(&bench.game, &resolved),
+            vec!["bin/x64/a/b/c", "bin/x64/a/b", "bin/x64/a"],
+            "deepest first, and never a directory that already exists"
+        );
+    }
+
+    #[test]
+    fn undoing_an_install_removes_the_directories_it_created() {
+        // The whole round trip, on the path a user actually takes: install
+        // into a folder that did not exist, then undo. Both the file and the
+        // folder have to go, or the game has not been put back.
+        let bench = bench();
+        let plan = build_plan(&PlanInput {
+            route: Route::NativeDll,
+            install_dir: "bin/x64/reshade-shaders/Shaders".to_owned(),
+            present: vec![],
+            pkg: vec![bench.offer("Motion.fx", b"shader source")],
+        })
+        .expect("plan");
+
+        let outer = bench.game.join("bin/x64/reshade-shaders");
+        installed(bench.run(&plan));
+        assert!(outer.exists(), "the install must have created it");
+
+        let undone = crate::install::restore::restore(&crate::install::restore::Request {
+            game_dir: &bench.game,
+            manifest_root: &bench.manifests,
+            cancel: &Cancel::new(),
+        })
+        .expect("restore");
+        assert!(
+            matches!(undone, crate::install::restore::Outcome::Restored(ref report) if report.complete),
+            "{undone:?}"
+        );
+
+        assert!(!outer.exists(), "the undo left {} behind", outer.display());
+        // And what was always there is untouched.
+        assert!(bench.game.join("bin/x64").is_dir());
+    }
+
+    #[test]
+    fn an_install_into_a_new_directory_records_what_it_created() {
+        // Writing a file creates its parent directories as a side effect of
+        // `copy_atomic`. Unless the journal records that, an undo removes the
+        // files and leaves the folders, and a failed install has still
+        // changed the game.
+        //
+        // It never mattered while the only route wrote beside the executable,
+        // into a directory that already existed. It matters now: placement
+        // puts shader packs in `reshade-shaders/`, which a game that never had
+        // ReShade does not have.
+        let bench = bench();
+        let plan = build_plan(&PlanInput {
+            route: Route::NativeDll,
+            install_dir: "bin/x64/reshade-shaders/Shaders".to_owned(),
+            present: vec![],
+            pkg: vec![bench.offer("Motion.fx", b"shader source")],
+        })
+        .expect("plan");
+
+        let created = bench.game.join("bin/x64/reshade-shaders");
+        assert!(!created.exists(), "the fixture must start without it");
+
+        installed(bench.run(&plan));
+        assert!(created.exists(), "the install must have created it");
+        assert!(
+            created.join("Shaders/Motion.fx").exists(),
+            "and written into it"
+        );
     }
 
     #[test]

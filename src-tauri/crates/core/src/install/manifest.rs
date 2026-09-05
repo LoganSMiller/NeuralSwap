@@ -63,6 +63,20 @@ pub struct InstallManifest {
     pub route: Route,
     pub installed_at: i64,
     pub files: Vec<ManifestFile>,
+    /// Directories this install brought into being, innermost first, relative
+    /// to the game folder.
+    ///
+    /// Carried here as well as in the journal because the two undo paths are
+    /// different: the journal rolls back an install that failed, and this
+    /// undoes one that succeeded, possibly months later. Both have to leave
+    /// the folder as they found it, and a manifest that only lists files can
+    /// only put files back.
+    ///
+    /// Removed with `remove_dir`, never `remove_dir_all` - see
+    /// [`crate::install::journal`] for why that distinction is the important
+    /// one.
+    #[serde(default)]
+    pub created_dirs: Vec<String>,
 }
 
 impl InstallManifest {
@@ -228,6 +242,7 @@ mod tests {
             route: Route::NativeDll,
             installed_at: 1_700_000_000,
             files,
+            created_dirs: Vec::new(),
         }
     }
 

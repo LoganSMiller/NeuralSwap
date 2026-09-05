@@ -270,6 +270,19 @@ fn cleanup(record: &InstallManifest, manifest_root: &Path) -> Result<()> {
             }
         }
     }
+
+    // Directories the install brought into being, innermost first. Putting the
+    // files back is not enough on its own: an empty `reshade-shaders/` left in
+    // a game folder is still a change the user did not ask for, and an undo
+    // that leaves litter is an undo somebody has to finish by hand.
+    //
+    // `remove_dir`, never `remove_dir_all`. A directory that is no longer
+    // empty holds something we did not put there, and it is not ours to
+    // delete. The failure is expected and ignored rather than reported.
+    for dir in &record.created_dirs {
+        let _ = std::fs::remove_dir(record.game_dir.join(dir.replace('\\', "/")));
+    }
+
     manifest::remove(manifest_root, &record.game_dir)
 }
 
