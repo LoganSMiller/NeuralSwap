@@ -63,6 +63,179 @@ pub trait LayerRegistry {
     fn remove(&self, value: &str) -> Result<()>;
 }
 
+/// What staging the layer's files did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "outcome")]
+pub enum Staged {
+    /// Files were written into the shared directory.
+    Written { files: Vec<String> },
+    /// Everything was already exactly right, so nothing was touched.
+    ///
+    /// Worth distinguishing: the shared directory is used by every game that
+    /// wants the layer, and rewriting it while another game is running would
+    /// replace a DLL out from under a live process.
+    AlreadyCurrent,
+}
+
+/// Put the layer's files in the shared directory, ready to be registered.
+///
+/// `from` is the component's extracted contents; `shared_dir` is the one
+/// directory for the machine.
+///
+/// # Which files
+///
+/// A 64-bit game needs the 64-bit pair. A 32-bit game needs **both**, and the
+/// reason is not obvious: the registry list is per account, not per
+/// application, and every entry names one manifest. Both manifests declare the
+/// same layer name - `VK_LAYER_reshade`, verified in the 6.8.0 installer - so
+/// they are not two layers but two architectures of one, and the Vulkan loader
+/// picks the matching build. Register only the 32-bit one and every 64-bit
+/// application on the account has a layer it cannot load.
+///
+/// DLSS5-Swapper stages exactly this set for exactly this reason.
+///
+/// # Why the files are checked before they are copied
+///
+/// This directory gets registered globally. A wrong file here is not one
+/// broken game, it is every Vulkan application on the account trying to load
+/// something that cannot work - so each DLL is verified to be ReShade, to be
+/// the add-on build, and to be the architecture its own name claims, before it
+/// is allowed in.
+pub fn stage(from: &Path, shared_dir: &Path, bitness: u8) -> Result<Staged> {
+    let wanted: &[u8] = if bitness == 32 { &[64, 32] } else { &[64] };
+
+    // Everything is checked before anything is written, the same discipline
+    // the archive extractor and the installer use: a refusal half way through
+    // leaves a directory nobody described - and this one is shared.
+    //
+    // The intended *contents* are resolved here rather than the sources,
+    // because the manifests are rewritten on the way in. Comparing a target
+    // against its source would never match for those, and the directory would
+    // be rewritten on every install - replacing a DLL out from under whatever
+    // game happened to be running off it.
+    let mut planned: Vec<(PathBuf, Vec<u8>, String)> = Vec::new();
+    for &each in wanted {
+        let dll = format!("ReShade{each}.dll");
+        let json = format!("ReShade{each}.json");
+        let source_dll = from.join(&dll);
+        let source_json = from.join(&json);
+
+        for path in [&source_dll, &source_json] {
+            if !path.is_file() {
+                return crate::error::fail(
+                    Code::PackageInvalid,
+                    format!("{} is not in this package", path.display()),
+                );
+            }
+        }
+
+        let check = crate::scan::footprints::inspect_injector(&source_dll);
+        if !check.usable_for(each) {
+            return crate::error::fail(
+                Code::PackageInvalid,
+                format!(
+                    "{dll} is not a {each}-bit ReShade with add-on support \
+                     (reshade={}, add-ons={}, bitness={:?}) - registering it would \
+                     affect every Vulkan program on this account",
+                    check.is_reshade, check.has_addon_support, check.bitness
+                ),
+            );
+        }
+
+        let bytes = std::fs::read(&source_dll).map_err(|error| {
+            crate::Error::new(
+                Code::PackageInvalid,
+                format!("could not read {}: {error}", source_dll.display()),
+            )
+        })?;
+        planned.push((shared_dir.join(&dll), bytes, dll.clone()));
+        planned.push((
+            shared_dir.join(&json),
+            manifest_bytes(&source_json, &dll)?,
+            json,
+        ));
+    }
+
+    // Already right? Then leave it alone. Another game may be running off
+    // these very files.
+    if planned
+        .iter()
+        .all(|(target, intended, _)| std::fs::read(target).is_ok_and(|found| &found == intended))
+    {
+        return Ok(Staged::AlreadyCurrent);
+    }
+
+    std::fs::create_dir_all(shared_dir).map_err(|error| {
+        crate::Error::new(
+            Code::StateUnwritable,
+            format!("could not create {}: {error}", shared_dir.display()),
+        )
+    })?;
+
+    let mut written = Vec::new();
+    for (target, intended, name) in &planned {
+        crate::fsx::atomic::write_atomic(target, intended)?;
+        written.push(name.clone());
+    }
+    Ok(Staged::Written { files: written })
+}
+
+/// The manifest as it should be written: the vendor's, with `library_path`
+/// naming its own sibling.
+///
+/// The shipped value is already `.\ReShade64.dll` - relative to the manifest,
+/// so a same-directory copy is correct as it stands. It is set anyway, and
+/// only that one field, so the copy is self-consistent whatever the source
+/// said. A manifest that points at a DLL which is not beside it is a global
+/// registration that cannot load, and that is not a thing to leave to trust.
+///
+/// Every other *value* is carried across: the layer name, the API version, the
+/// device extensions and the disable switch are ReShade's business, not ours.
+///
+/// The key **order** is not preserved - the document is parsed and
+/// re-serialised, and that sorts object keys. JSON objects are unordered by
+/// definition and the Vulkan loader parses the file rather than matching it,
+/// so this changes nothing that reads it. Worth stating rather than implying
+/// the bytes come through unchanged, because they do not: a digest taken of
+/// the vendor's file will not match the staged one.
+fn manifest_bytes(source: &Path, dll: &str) -> Result<Vec<u8>> {
+    let text = std::fs::read_to_string(source).map_err(|error| {
+        crate::Error::new(
+            Code::PackageInvalid,
+            format!("could not read {}: {error}", source.display()),
+        )
+    })?;
+    let mut parsed: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        crate::Error::new(
+            Code::PackageInvalid,
+            format!("{} is not JSON: {error}", source.display()),
+        )
+    })?;
+
+    let Some(layer) = parsed
+        .get_mut("layer")
+        .and_then(|found| found.as_object_mut())
+    else {
+        return crate::error::fail(
+            Code::PackageInvalid,
+            format!("{} has no \"layer\" object", source.display()),
+        );
+    };
+    layer.insert(
+        "library_path".to_owned(),
+        serde_json::Value::String(format!(".\\{dll}")),
+    );
+
+    let mut bytes = serde_json::to_vec_pretty(&parsed).map_err(|error| {
+        crate::Error::new(
+            Code::StateUnwritable,
+            format!("could not serialise {}: {error}", source.display()),
+        )
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 /// A registry with nothing in it, which refuses to be written.
 ///
 /// For the two cases where there is genuinely nothing to talk to: a build for
@@ -318,6 +491,211 @@ mod tests {
 
     fn shared() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    /// A package holding synthetic ReShade files.
+    ///
+    /// Synthetic rather than the real 5.5 MB DLLs: what `stage` cares about is
+    /// the two marker strings and the PE machine field, and a fixture that
+    /// carries exactly those says what the check depends on. The real binaries
+    /// are verified against `inspect_injector` in `scan::footprints`.
+    fn package(bits: &[u8]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for &each in bits {
+            // A minimal PE, far enough in for the reader to answer bitness.
+            // Bitness comes from the optional header's magic - PE32 against
+            // PE32+ - not from the COFF machine field, and the optional
+            // header is only read if `SizeOfOptionalHeader` says it is there.
+            // Leaving that zero was the first version's mistake.
+            //
+            // Written at explicit offsets rather than by appending, because
+            // this is a structure and appending hides where things land.
+            const PE_AT: usize = 0x80;
+            let mut dll = vec![0_u8; 0x400];
+            let put16 = |dll: &mut Vec<u8>, at: usize, value: u16| {
+                dll[at..at + 2].copy_from_slice(&value.to_le_bytes());
+            };
+
+            dll[0..2].copy_from_slice(b"MZ");
+            dll[0x3c..0x40].copy_from_slice(&(PE_AT as u32).to_le_bytes());
+            dll[PE_AT..PE_AT + 4].copy_from_slice(b"PE\0\0");
+            // COFF header: machine, section count, and the size of the
+            // optional header that follows it.
+            put16(
+                &mut dll,
+                PE_AT + 4,
+                if each == 32 { 0x014c } else { 0x8664 },
+            );
+            put16(&mut dll, PE_AT + 6, 0);
+            let optional_size: u16 = if each == 32 { 224 } else { 240 };
+            put16(&mut dll, PE_AT + 20, optional_size);
+            // The optional header's magic, which is what decides bitness.
+            put16(
+                &mut dll,
+                PE_AT + 24,
+                if each == 32 { 0x010b } else { 0x020b },
+            );
+
+            dll.extend_from_slice(b"ReShade");
+            dll.extend_from_slice(b"Searching for add-ons");
+            std::fs::write(dir.path().join(format!("ReShade{each}.dll")), &dll).expect("dll");
+
+            // The manifest as shipped, including the sibling-relative path.
+            let json = format!(
+                r#"{{"file_format_version":"1.0.0","layer":{{"name":"VK_LAYER_reshade","type":"GLOBAL","library_path":".\\ReShade{each}.dll"}}}}"#
+            );
+            std::fs::write(dir.path().join(format!("ReShade{each}.json")), json).expect("json");
+        }
+        dir
+    }
+
+    #[test]
+    fn a_sixty_four_bit_game_stages_one_pair() {
+        let from = package(&[64, 32]);
+        let shared = shared();
+        let done = stage(from.path(), shared.path(), 64).expect("stage");
+
+        match done {
+            Staged::Written { files } => {
+                assert_eq!(files, vec!["ReShade64.dll", "ReShade64.json"]);
+            }
+            other => panic!("expected a write, got {other:?}"),
+        }
+        assert!(shared.path().join("ReShade64.dll").is_file());
+        assert!(!shared.path().join("ReShade32.dll").exists());
+    }
+
+    #[test]
+    fn a_thirty_two_bit_game_stages_both_pairs() {
+        // Not obvious, and the reason matters: the registry list is per
+        // account and both manifests declare the same layer name, so they are
+        // two architectures of one layer. Register only the 32-bit one and
+        // every 64-bit application on the account has a layer it cannot load.
+        let from = package(&[64, 32]);
+        let shared = shared();
+        let done = stage(from.path(), shared.path(), 32).expect("stage");
+
+        match done {
+            Staged::Written { files } => assert_eq!(
+                files,
+                vec![
+                    "ReShade64.dll",
+                    "ReShade64.json",
+                    "ReShade32.dll",
+                    "ReShade32.json"
+                ]
+            ),
+            other => panic!("expected a write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn staging_twice_writes_nothing_the_second_time() {
+        // The shared directory is used by every game that wants the layer.
+        // Rewriting it needlessly would replace a DLL out from under whatever
+        // game happens to be running off it.
+        //
+        // This is the case an earlier version got wrong: it compared each
+        // target against its *source*, and the manifests are rewritten on the
+        // way in, so they never matched and the directory was rewritten every
+        // time.
+        let from = package(&[64]);
+        let shared = shared();
+        assert!(matches!(
+            stage(from.path(), shared.path(), 64),
+            Ok(Staged::Written { .. })
+        ));
+        assert_eq!(
+            stage(from.path(), shared.path(), 64).expect("second"),
+            Staged::AlreadyCurrent
+        );
+    }
+
+    #[test]
+    fn the_staged_manifest_points_at_its_own_sibling() {
+        let from = package(&[64]);
+        let shared = shared();
+        stage(from.path(), shared.path(), 64).expect("stage");
+
+        let text =
+            std::fs::read_to_string(shared.path().join("ReShade64.json")).expect("read manifest");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(parsed["layer"]["library_path"], ".\\ReShade64.dll");
+        // And nothing else was invented or lost.
+        assert_eq!(parsed["layer"]["name"], "VK_LAYER_reshade");
+        assert_eq!(parsed["layer"]["type"], "GLOBAL");
+        assert_eq!(parsed["file_format_version"], "1.0.0");
+    }
+
+    #[test]
+    fn a_manifest_pointing_elsewhere_is_corrected() {
+        // A manifest naming a DLL that is not beside it is a global
+        // registration that cannot load. The one field is set so the copy is
+        // self-consistent whatever the source said.
+        let from = package(&[64]);
+        std::fs::write(
+            from.path().join("ReShade64.json"),
+            r#"{"layer":{"name":"VK_LAYER_reshade","library_path":"C:\\somewhere\\else.dll"}}"#,
+        )
+        .expect("write");
+
+        let shared = shared();
+        stage(from.path(), shared.path(), 64).expect("stage");
+        let text =
+            std::fs::read_to_string(shared.path().join("ReShade64.json")).expect("read manifest");
+        assert!(text.contains("ReShade64.dll"), "{text}");
+        assert!(!text.contains("somewhere"), "{text}");
+    }
+
+    #[test]
+    fn the_wrong_build_is_refused_before_anything_is_written() {
+        // This directory gets registered globally. A wrong file here is not
+        // one broken game, it is every Vulkan application on the account
+        // trying to load something that cannot work.
+        let from = package(&[64]);
+        // Strip the add-on marker: plain ReShade, which loads no add-ons.
+        let plain = std::fs::read(from.path().join("ReShade64.dll"))
+            .expect("read")
+            .into_iter()
+            .collect::<Vec<u8>>();
+        let cut = plain.len() - b"Searching for add-ons".len();
+        std::fs::write(from.path().join("ReShade64.dll"), &plain[..cut]).expect("write");
+
+        let shared = shared();
+        let refused = stage(from.path(), shared.path(), 64).expect_err("plain build");
+        assert_eq!(refused.code, Code::PackageInvalid);
+        assert!(refused.detail.contains("add-on"), "{refused:?}");
+        assert!(
+            !shared.path().join("ReShade64.dll").exists(),
+            "nothing may be written when the check fails"
+        );
+    }
+
+    #[test]
+    fn a_mismatched_architecture_is_refused() {
+        // A 32-bit DLL wearing the 64-bit name. Registered globally, it would
+        // be a layer no 64-bit application can load.
+        let from = package(&[64, 32]);
+        let thirty_two = std::fs::read(from.path().join("ReShade32.dll")).expect("read");
+        std::fs::write(from.path().join("ReShade64.dll"), thirty_two).expect("write");
+
+        let shared = shared();
+        let refused = stage(from.path(), shared.path(), 64).expect_err("wrong architecture");
+        assert_eq!(refused.code, Code::PackageInvalid);
+    }
+
+    #[test]
+    fn a_package_missing_a_file_is_refused_rather_than_half_staged() {
+        let from = package(&[64]);
+        std::fs::remove_file(from.path().join("ReShade64.json")).expect("remove");
+        let shared = shared();
+
+        let refused = stage(from.path(), shared.path(), 64).expect_err("incomplete");
+        assert_eq!(refused.code, Code::PackageInvalid);
+        assert!(
+            !shared.path().join("ReShade64.dll").exists(),
+            "the DLL must not be staged without its manifest"
+        );
     }
 
     #[test]
