@@ -46,6 +46,13 @@ pub enum Code {
     InsufficientSpace,
     VerifyFailed,
     PlanStale,
+    /// Anti-cheat is installed with this game.
+    ///
+    /// The only refusal here whose consequence is irreversible: an injected
+    /// add-on can get an account banned, and nothing this program does can
+    /// undo that. Blocked by default, and past only by explicit
+    /// acknowledgement.
+    AntiCheatPresent,
 }
 
 impl Code {
@@ -56,7 +63,7 @@ impl Code {
     /// time with no counterpart in `ErrorCode`, which meant the UI could
     /// receive a code it had no translation for and show a user the raw
     /// string. `spec/errors.json` now pins the two together.
-    pub const ALL: [Code; 27] = [
+    pub const ALL: [Code; 28] = [
         Code::UnsafePath,
         Code::ReservedName,
         Code::SymlinkRefused,
@@ -84,6 +91,7 @@ impl Code {
         Code::InsufficientSpace,
         Code::VerifyFailed,
         Code::PlanStale,
+        Code::AntiCheatPresent,
     ];
 
     /// The wire form. Must match the TypeScript `ErrorCode` union exactly.
@@ -116,6 +124,7 @@ impl Code {
             Code::InsufficientSpace => "insufficientSpace",
             Code::VerifyFailed => "verifyFailed",
             Code::PlanStale => "planStale",
+            Code::AntiCheatPresent => "antiCheatPresent",
         }
     }
 }

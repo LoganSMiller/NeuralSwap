@@ -27,6 +27,7 @@
     "targetProtected",
     "insufficientSpace",
     "verifyFailed",
-    "planStale"
+    "planStale",
+    "antiCheatPresent"
   ]
 }

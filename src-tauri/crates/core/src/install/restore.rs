@@ -523,6 +523,7 @@ mod tests {
                 backup_root: &self.backups,
                 manifest_root: &self.manifests,
                 requires: None,
+                anti_cheat_acknowledged: false,
                 layers: &crate::install::layer::NoRegistry,
                 cancel: &self.cancel,
             })

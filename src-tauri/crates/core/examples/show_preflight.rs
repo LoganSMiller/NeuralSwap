@@ -65,6 +65,7 @@ fn main() {
             source_dir: package.path(),
             backup_dir: backups.path(),
             requires: None,
+            anti_cheat_acknowledged: false,
         });
 
         println!("\n{}", game.name);

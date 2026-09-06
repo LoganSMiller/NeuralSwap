@@ -52,6 +52,9 @@ pub struct Request<'a> {
     /// The hardware generation this package's runtime needs, if it states one.
     /// Passed straight to the preflight, which decides what to do about it.
     pub requires: Option<crate::platform::gpu::Generation>,
+    /// The user has seen the anti-cheat warning and chosen to proceed.
+    /// Threaded to the preflight, which is where the decision is made.
+    pub anti_cheat_acknowledged: bool,
     /// Needed to undo a machine-wide effect if this install has to roll back.
     ///
     /// Passed in rather than constructed, for the same reason the fetcher is:
@@ -177,6 +180,7 @@ pub fn apply(request: &Request<'_>) -> Result<Outcome> {
         source_dir: request.source_dir,
         backup_dir: request.backup_root,
         requires: request.requires,
+        anti_cheat_acknowledged: request.anti_cheat_acknowledged,
     });
     if !report.ok {
         return Ok(Outcome::Refused(report));
@@ -568,6 +572,7 @@ mod tests {
                 backup_root: &self.backups,
                 manifest_root: &self.manifests,
                 requires: None,
+                anti_cheat_acknowledged: false,
                 layers: &crate::install::layer::NoRegistry,
                 cancel: &self.cancel,
             })
@@ -710,7 +715,7 @@ mod tests {
         match bench.run(&plan) {
             Outcome::Refused(report) => {
                 assert!(!report.ok);
-                assert_eq!(report.checks.len(), 10);
+                assert_eq!(report.checks.len(), 11);
             }
             other => panic!("expected a refusal, got {other:?}"),
         }

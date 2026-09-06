@@ -110,6 +110,7 @@ impl Installer {
         plan: &Plan,
         package_dir: &Path,
         requires: Option<Generation>,
+        anti_cheat_acknowledged: bool,
     ) -> preflight::Preflight {
         preflight::preflight(&preflight::Request {
             game_dir,
@@ -117,6 +118,7 @@ impl Installer {
             source_dir: package_dir,
             backup_dir: &self.backup_root,
             requires,
+            anti_cheat_acknowledged,
         })
     }
 
@@ -126,6 +128,7 @@ impl Installer {
         game_dir: &Path,
         plan: &Plan,
         package_dir: &Path,
+        anti_cheat_acknowledged: bool,
     ) -> Result<apply::Outcome> {
         let key = key_of(game_dir);
         let Some(_guard) = self.locks.try_acquire(&key) else {
@@ -150,6 +153,7 @@ impl Installer {
             backup_root: &self.backup_root,
             manifest_root: &self.manifest_root,
             requires: None,
+            anti_cheat_acknowledged,
             layers: self.layers.as_ref(),
             cancel: &cancel,
         })
@@ -377,7 +381,7 @@ mod tests {
             backup_bytes: 0,
             changes: 0,
         };
-        let outcome = installer.apply(&game, &plan, dir.path());
+        let outcome = installer.apply(&game, &plan, dir.path(), false);
         assert_eq!(outcome.err().map(|error| error.code), Some(Code::JobBusy));
 
         drop(held);

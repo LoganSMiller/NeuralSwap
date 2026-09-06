@@ -450,7 +450,7 @@ pub async fn install_plan(
     // goes to a blocking thread rather than stalling the UI thread.
     blocking(move || {
         let plan = installer.plan(&game, &rel, &package)?;
-        let preflight = installer.preflight(&game, &plan, &package, None);
+        let preflight = installer.preflight(&game, &plan, &package, None, false);
         Ok(PlanReply {
             busy: installer.is_busy(&game),
             plan,
@@ -474,6 +474,11 @@ pub async fn install_apply(
     game_dir: AbsolutePath,
     install_dir: RelativeDir,
     package_dir: AbsolutePath,
+    // `acknowledge_anti_cheat` is named on the wire rather than defaulted, so
+    // the UI has to pass it deliberately. Anti-cheat is the one refusal here
+    // whose consequence - an account ban - nothing can undo, so the override
+    // has to be an act rather than an omission.
+    acknowledge_anti_cheat: bool,
 ) -> Reply<neuralswap_core::install::Outcome> {
     assert_in_library(&state, game_dir.as_path())?;
     let installer = Arc::clone(&state.installer);
@@ -489,7 +494,7 @@ pub async fn install_apply(
             plan.changes,
             plan.write_bytes
         );
-        let outcome = installer.apply(&game, &plan, &package)?;
+        let outcome = installer.apply(&game, &plan, &package, acknowledge_anti_cheat)?;
         log::info!("install outcome: {outcome:?}");
         Ok(outcome)
     })

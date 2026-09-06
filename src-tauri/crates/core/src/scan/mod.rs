@@ -1,3 +1,4 @@
+pub mod anticheat;
 pub mod api;
 pub mod candidates;
 pub mod capability;

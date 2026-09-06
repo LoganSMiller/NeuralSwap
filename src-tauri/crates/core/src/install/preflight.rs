@@ -22,7 +22,7 @@ use crate::fsx::paths::safe_path;
 use crate::install::plan::{Plan, StepAction};
 use crate::platform::gpu::{self, Generation};
 use crate::scan::capability::Feature;
-use crate::scan::footprints;
+use crate::scan::{anticheat, footprints};
 
 /// Kept as a fixed set rather than free text so the UI can explain each one
 /// properly, in the user's language, with the right advice attached.
@@ -39,6 +39,7 @@ pub enum CheckName {
     GraphicsCard,
     OtherTools,
     DriverOverride,
+    AntiCheat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +106,14 @@ pub struct Request<'a> {
     /// `None` means the package has made no claim, and the check reports that
     /// rather than inventing a requirement.
     pub requires: Option<Generation>,
+    /// The user has been shown the anti-cheat warning and chosen to proceed.
+    ///
+    /// Off by default, and it has to be. Every other refusal here guards a
+    /// recoverable state; this one guards an account ban, which nothing this
+    /// program does can undo. So the safe answer is the default, and getting
+    /// past it is a decision somebody made on purpose rather than a warning
+    /// they scrolled past.
+    pub anti_cheat_acknowledged: bool,
 }
 
 pub fn preflight(request: &Request<'_>) -> Preflight {
@@ -121,12 +130,67 @@ pub fn preflight(request: &Request<'_>) -> Preflight {
         check_graphics_card(request),
         check_other_tools(request),
         check_driver_override(request),
+        check_anti_cheat(request),
     ];
 
     let ok = !checks
         .iter()
         .any(|check| check.outcome == CheckOutcome::Fail);
     Preflight { checks, ok }
+}
+
+/// Whether anti-cheat is installed with this game.
+///
+/// The only check here that fails rather than warns on something outside our
+/// control, and the reason is that its worst outcome is the only irreversible
+/// one in the application. A replaced file has a backup; a created directory
+/// is removed; a registry value is taken back. A banned account is not
+/// recoverable by any amount of care in this code.
+///
+/// So it blocks, and `anti_cheat_acknowledged` is the only way past. That flag
+/// exists so the override is a decision rather than a dismissed dialog: the UI
+/// has to show what was found and ask, then run the checks again.
+///
+/// It reports the finding either way. A user who has acknowledged it still
+/// wants to see which product was detected, and the install log should record
+/// that this was known and accepted.
+fn check_anti_cheat(request: &Request<'_>) -> Check {
+    let install_dir = request
+        .plan
+        .steps
+        .iter()
+        .filter(|step| step.action != StepAction::Skip)
+        .find_map(|step| {
+            let rel = step.rel.replace('\\', "/");
+            rel.rsplit_once('/')
+                .map(|(dir, _)| request.game_dir.join(dir))
+        })
+        .unwrap_or_else(|| request.game_dir.to_path_buf());
+
+    let found = anticheat::detect(&install_dir, request.game_dir);
+    if !found.present() {
+        return pass(CheckName::AntiCheat, "no anti-cheat found with this game");
+    }
+
+    if request.anti_cheat_acknowledged {
+        return Check {
+            name: CheckName::AntiCheat,
+            outcome: CheckOutcome::Warn,
+            detail: format!(
+                "{} is installed here, and you have chosen to install anyway. Found: {}.",
+                found.summary(),
+                found.evidence.join(", ")
+            ),
+            code: None,
+        };
+    }
+
+    Check {
+        name: CheckName::AntiCheat,
+        outcome: CheckOutcome::Fail,
+        detail: found.message(),
+        code: Some(Code::AntiCheatPresent.as_str().to_owned()),
+    }
 }
 
 /// Whether the NVIDIA driver is set to supply a runtime this install writes.
@@ -789,6 +853,7 @@ mod tests {
             source_dir: &fixture.source,
             backup_dir: &fixture.backups,
             requires: None,
+            anti_cheat_acknowledged: false,
         })
     }
 
@@ -879,7 +944,7 @@ mod tests {
         assert!(report.ok, "{:?}", report.blockers());
         // Every check is reported, not just the failures - the user sees the
         // whole picture on one screen.
-        assert_eq!(report.checks.len(), 10);
+        assert_eq!(report.checks.len(), 11);
     }
 
     #[test]
@@ -894,7 +959,7 @@ mod tests {
         };
         let report = run(&broken);
         assert!(!report.ok);
-        assert_eq!(report.checks.len(), 10);
+        assert_eq!(report.checks.len(), 11);
         assert_eq!(
             outcome_of(&report, CheckName::GameDirectory),
             CheckOutcome::Fail
@@ -1002,6 +1067,7 @@ mod tests {
             source_dir: &fixture.source,
             backup_dir: &fixture.backups,
             requires: Some(requires),
+            anti_cheat_acknowledged: false,
         })
     }
 

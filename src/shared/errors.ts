@@ -47,7 +47,12 @@ export const ERROR_CODES = [
   'targetProtected',
   'insufficientSpace',
   'verifyFailed',
-  'planStale'
+  'planStale',
+  // Anti-cheat is installed with this game. The only refusal whose
+  // consequence is irreversible - an injected add-on can get an account
+  // banned - so it blocks by default and takes an explicit acknowledgement
+  // to get past.
+  'antiCheatPresent'
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
