@@ -898,6 +898,45 @@ this. Modelled here as `Substitute::FsrFrameGeneration`, which carries its own
 `Generation::Turing` floor precisely because applying the feature's Ada floor
 would refuse it on the cards it exists for.
 
+### The settings are half the install
+
+Copying the files and writing no settings gives a component that loads and
+does nothing. `install::optiscaler` decides which keys a given situation needs;
+`install::ini` writes them without disturbing the rest of the file.
+
+| section | key | when |
+| --- | --- | --- |
+| `DlssNr` | `Enabled=true` | neural rendering wanted |
+| `DlssNr` | `WorkingScale` | only when the user sets the dial |
+| `FrameGen` | `Enabled`, `FGInput=upscaler`, `FGOutput=fsrfg` | FSR 3.1 FG is the chosen mechanism |
+| `OptiFG` | `HUDFix=true` | with it — not optional, see below |
+| `Inputs` | `Enable*Inputs` **and** `Use*Inputs` | the game ships FSR or XeSS |
+| `Inputs` | `UseFsr2Dx11Inputs` | that game is Direct3D 11 |
+| `Upscalers` | `Dx12Upscaler=dlss` | a redirected game on D3D12 |
+| `Upscalers` | `Dx11Upscaler=fsr22_12` | neural rendering on D3D11 |
+
+Four details that are each the difference between working and silently not:
+
+- **`Enable*` and `Use*` are both needed.** The first lets OptiScaler hook the
+  entry point, the second makes it act. One without the other is a hook that
+  reports success and changes nothing.
+- **`HUDFix` is not a preference.** With the upscaler as input and HUDFix off,
+  the interface is generated along with the frame and text ghosts.
+- **The dial is `WorkingScale`, and it is a fraction** — `0.75`, not `75`.
+  Writing `Scale = 75` sets a key OptiScaler does not know, so it is ignored in
+  silence while the install reports having moved the largest performance lever
+  on the route. This was written wrongly here first and caught by reading a
+  real `OptiScaler.ini`.
+- **The two `[Upscalers]` keys answer different questions**, under conditions
+  that do not overlap. `Dx12Upscaler=dlss` puts a redirected game into DLSS;
+  `Dx11Upscaler=fsr22_12` exists because the model refuses D3D11 outright and
+  rides OptiScaler's own D3D12 bridge there, where DLSS cannot be the upscaler.
+
+Nothing is written "to be safe". A key set in a file somebody tuned is a change
+they did not ask for and may not notice, and several of these are mutually
+exclusive answers to "which upscaler are you hooking". A D3D12 game with its
+own DLSS gets exactly one key.
+
 ### A trap worth naming
 
 OptiScaler's own package ships `libxess.dll` and `amd_fidelityfx_*.dll` under
