@@ -48,15 +48,33 @@ use crate::fsx::atomic::{read_to_string_or_none, write_json_atomic};
 /// account on the machine.
 pub const REGISTRY_KEY: &str = r"Software\Khronos\Vulkan\ImplicitLayers";
 
+/// One registered implicit layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Registration {
+    /// The value name, which is the manifest's absolute path.
+    pub value: String,
+    /// Whether the Vulkan loader will actually apply it.
+    ///
+    /// The value's data is a `DWORD` and **only zero means enabled**;
+    /// anything else means registered but disabled. This is not a detail:
+    /// treating a disabled registration as a working one is how an install
+    /// finishes, reports success, and leaves the game with no injector at
+    /// all. DLSS5-Autopilot's `vulkan.py` says so in as many words, and this
+    /// carries the flag for that reason.
+    pub enabled: bool,
+    /// Which hive it came from, for reporting.
+    ///
+    /// ReShade's own installer writes `HKLM` when it is run elevated, so a
+    /// reader that only looks at `HKCU` misses a registration the user
+    /// already has - and then adds a second one.
+    pub machine_wide: bool,
+}
+
 /// The registry, as this module needs it.
 pub trait LayerRegistry {
-    /// Every implicit-layer value currently registered, by name.
-    ///
-    /// The name is the manifest's absolute path; the data is a `DWORD` where
-    /// zero means enabled. Values that are not layer manifests, or that are
-    /// disabled, are the host's business to filter or not - this module only
-    /// asks whether a path is listed.
-    fn values(&self) -> Result<Vec<String>>;
+    /// Every implicit-layer registration, from every hive that has them.
+    fn values(&self) -> Result<Vec<Registration>>;
 
     fn add(&self, value: &str) -> Result<()>;
 
@@ -246,7 +264,7 @@ fn manifest_bytes(source: &Path, dll: &str) -> Result<Vec<u8>> {
 pub struct NoRegistry;
 
 impl LayerRegistry for NoRegistry {
-    fn values(&self) -> Result<Vec<String>> {
+    fn values(&self) -> Result<Vec<Registration>> {
         Ok(Vec::new())
     }
     fn add(&self, value: &str) -> Result<()> {
@@ -366,7 +384,49 @@ fn is_a_reshade_layer(value: &str) -> bool {
     lower
         .rsplit('/')
         .next()
-        .is_some_and(|name| name.starts_with("reshade") && name.ends_with(".json"))
+        // `contains`, not `starts_with`. An earlier version required the name
+        // to begin with "reshade" and so did not recognise a manifest called
+        // anything else - `theirs-ReShade64.json`, a versioned copy, whatever
+        // a user or another tool chose. Failing to recognise a foreign layer
+        // means registering a second one beside it, so recall matters more
+        // here than precision. DLSS5-Autopilot matches the same way.
+        .is_some_and(|name| name.contains("reshade") && name.ends_with(".json"))
+}
+
+/// Whether a registered manifest names a DLL this bitness can load.
+///
+/// A 64-bit process cannot load `ReShade32.dll` and a 32-bit one cannot load
+/// `ReShade64.dll`, so a layer registered for the other architecture is not a
+/// layer this game has. Read from the manifest's own `library_path` rather
+/// than from the value's file name, because the two need not agree - and the
+/// loader follows the manifest.
+///
+/// A manifest that cannot be read, or that names nothing recognisable, counts
+/// as serving every architecture. That is the cautious direction here: it
+/// makes us stand down and report a foreign registration rather than add a
+/// second one beside something we do not understand.
+fn manifest_serves(value: &str, bitness: u8) -> bool {
+    let named = std::fs::read_to_string(value)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|parsed| {
+            parsed
+                .get("layer")
+                .and_then(|layer| layer.get("library_path"))
+                .and_then(|path| path.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| value.to_owned());
+
+    let file = named.replace('\\', "/").to_lowercase();
+    let file = file.rsplit('/').next().unwrap_or(&file);
+    if file.contains("32") {
+        return bitness == 32;
+    }
+    if file.contains("64") {
+        return bitness != 32;
+    }
+    true
 }
 
 /// Ensure the layer is registered and that `game_dir` is counted as wanting it.
@@ -378,23 +438,42 @@ pub fn register(
     shared_dir: &Path,
     manifest: &str,
     game_dir: &Path,
+    bitness: u8,
 ) -> Result<Registered> {
     let ours = value_for(shared_dir, manifest);
     let existing = registry.values()?;
 
-    // Somebody else's ReShade layer. Not ours to replace, and quite possibly
-    // doing the job already - but we cannot know, so we say what we found and
-    // change nothing.
-    if let Some(foreign) = existing
-        .iter()
-        .find(|value| is_a_reshade_layer(value) && !is_ours(value, &ours))
-    {
+    // Somebody else's ReShade layer, and three conditions have to hold before
+    // it counts as one - each of them a way an earlier version of this got it
+    // wrong:
+    //
+    // 1. It has to be **enabled**. A value whose data is not zero is
+    //    registered but disabled, and standing down for one of those leaves
+    //    the game with no injector while the install reports success.
+    // 2. It has to be for **this game's architecture**. A 64-bit game cannot
+    //    load `ReShade32.dll`. "A ReShade layer is registered" is not the
+    //    question; "is one registered that this game can load" is.
+    // 3. It has to not be ours.
+    //
+    // Standing down when all three hold is right: the user's own ReShade may
+    // well already do the job, and replacing a setup we know nothing about is
+    // not ours to do.
+    if let Some(foreign) = existing.iter().find(|found| {
+        found.enabled
+            && is_a_reshade_layer(&found.value)
+            && !is_ours(&found.value, &ours)
+            && manifest_serves(&found.value, bitness)
+    }) {
         return Ok(Registered::Foreign {
-            value: foreign.clone(),
+            value: foreign.value.clone(),
         });
     }
 
-    let already = existing.iter().any(|value| is_ours(value, &ours));
+    // Ours counts only if it is enabled too. A disabled registration of our
+    // own is not a working install, and re-adding it is how it gets fixed.
+    let already = existing
+        .iter()
+        .any(|found| found.enabled && is_ours(&found.value, &ours));
 
     // The list is updated before the registry write, so a crash between the
     // two leaves a game counted for a layer that is not registered. That is
@@ -444,7 +523,7 @@ pub fn deregister(
     // if the value is not there, or is somebody else's, there is nothing here
     // to undo.
     let existing = registry.values()?;
-    if !existing.iter().any(|value| is_ours(value, &ours)) {
+    if !existing.iter().any(|found| is_ours(&found.value, &ours)) {
         return Ok(Deregistered::NothingOfOurs);
     }
     registry.remove(&ours)?;
@@ -459,32 +538,52 @@ mod tests {
     /// A registry that lives in memory, so no test can touch a real one.
     #[derive(Default)]
     struct Fake {
-        values: RefCell<Vec<String>>,
+        values: RefCell<Vec<Registration>>,
         fail_add: bool,
+    }
+
+    fn enabled(value: &str) -> Registration {
+        Registration {
+            value: value.to_owned(),
+            enabled: true,
+            machine_wide: false,
+        }
     }
 
     impl Fake {
         fn with(values: &[&str]) -> Self {
             Self {
-                values: RefCell::new(values.iter().map(|item| (*item).to_owned()).collect()),
+                values: RefCell::new(values.iter().map(|item| enabled(item)).collect()),
+                fail_add: false,
+            }
+        }
+
+        /// A registration that is present but switched off.
+        fn disabled(value: &str) -> Self {
+            Self {
+                values: RefCell::new(vec![Registration {
+                    value: value.to_owned(),
+                    enabled: false,
+                    machine_wide: false,
+                }]),
                 fail_add: false,
             }
         }
     }
 
     impl LayerRegistry for Fake {
-        fn values(&self) -> Result<Vec<String>> {
+        fn values(&self) -> Result<Vec<Registration>> {
             Ok(self.values.borrow().clone())
         }
         fn add(&self, value: &str) -> Result<()> {
             if self.fail_add {
                 return crate::error::fail(Code::StateUnwritable, "refused");
             }
-            self.values.borrow_mut().push(value.to_owned());
+            self.values.borrow_mut().push(enabled(value));
             Ok(())
         }
         fn remove(&self, value: &str) -> Result<()> {
-            self.values.borrow_mut().retain(|item| item != value);
+            self.values.borrow_mut().retain(|item| item.value != value);
             Ok(())
         }
     }
@@ -707,6 +806,7 @@ mod tests {
             dir.path(),
             "ReShade64.json",
             Path::new("D:/Games/One"),
+            64,
         )
         .expect("register");
 
@@ -729,6 +829,7 @@ mod tests {
             dir.path(),
             "ReShade64.json",
             Path::new("D:/Games/One"),
+            64,
         )
         .expect("first");
         let found = register(
@@ -736,6 +837,7 @@ mod tests {
             dir.path(),
             "ReShade64.json",
             Path::new("D:/Games/Two"),
+            64,
         )
         .expect("second");
 
@@ -755,7 +857,8 @@ mod tests {
         let dir = shared();
         let registry = Fake::default();
         for game in ["D:/Games/One", "D:/Games/Two"] {
-            register(&registry, dir.path(), "ReShade64.json", Path::new(game)).expect("register");
+            register(&registry, dir.path(), "ReShade64.json", Path::new(game), 64)
+                .expect("register");
         }
 
         let first = deregister(
@@ -794,6 +897,7 @@ mod tests {
             dir.path(),
             "ReShade64.json",
             Path::new("D:\\Games\\One"),
+            64,
         )
         .expect("register");
         let again = register(
@@ -801,6 +905,7 @@ mod tests {
             dir.path(),
             "ReShade64.json",
             Path::new("d:/games/one"),
+            64,
         )
         .expect("register");
 
@@ -830,6 +935,7 @@ mod tests {
             dir.path(),
             "ReShade64.json",
             Path::new("D:/Games/One"),
+            64,
         )
         .expect("register");
 
@@ -839,11 +945,109 @@ mod tests {
         }
         assert_eq!(
             registry.values.borrow().as_slice(),
-            &[theirs.to_owned()],
+            &[enabled(theirs)],
             "nothing of theirs may be touched"
         );
         // And no game was counted, so a later undo has nothing to remove.
         assert!(!users_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn a_disabled_registration_does_not_count_as_one() {
+        // The value's data is a DWORD and only zero means enabled. A
+        // registration that is present but switched off does nothing, and
+        // standing down for it is how an install finishes, reports success,
+        // and leaves the game with no injector at all.
+        let theirs = r"C:\Users\someone\ReShade\ReShade64.json";
+        let registry = Fake::disabled(theirs);
+        let dir = shared();
+
+        let found = register(
+            &registry,
+            dir.path(),
+            "ReShade64.json",
+            Path::new("D:/Games/One"),
+            64,
+        )
+        .expect("register");
+
+        assert!(
+            matches!(found, Registered::Added { .. }),
+            "a disabled foreign layer must not stop us: {found:?}"
+        );
+    }
+
+    #[test]
+    fn our_own_registration_being_disabled_is_not_already_done() {
+        // Same rule pointed at ourselves. A disabled registration of our own
+        // is not a working install, and re-adding it is how it gets fixed.
+        let dir = shared();
+        let ours = value_for(dir.path(), "ReShade64.json");
+        let registry = Fake::disabled(&ours);
+
+        let found = register(
+            &registry,
+            dir.path(),
+            "ReShade64.json",
+            Path::new("D:/Games/One"),
+            64,
+        )
+        .expect("register");
+        assert!(matches!(found, Registered::Added { .. }), "{found:?}");
+    }
+
+    #[test]
+    fn a_layer_for_the_other_architecture_is_not_a_layer_this_game_has() {
+        // "A ReShade layer is registered" is not the question. A 64-bit game
+        // cannot load ReShade32.dll, so a 32-bit registration leaves it with
+        // nothing - and standing down for one would be reporting a working
+        // setup that cannot work.
+        let dir = shared();
+        let theirs = dir.path().join("theirs-ReShade32.json");
+        std::fs::write(
+            &theirs,
+            r#"{"layer":{"name":"VK_LAYER_reshade","library_path":".\\ReShade32.dll"}}"#,
+        )
+        .expect("write");
+        let registry = Fake::with(&[&theirs.to_string_lossy()]);
+
+        // A 64-bit game: theirs is 32-bit, so it does not serve us.
+        let sixty_four = register(
+            &registry,
+            dir.path(),
+            "ReShade64.json",
+            Path::new("D:/Games/One"),
+            64,
+        )
+        .expect("register");
+        assert!(
+            matches!(sixty_four, Registered::Added { .. }),
+            "{sixty_four:?}"
+        );
+
+        // A 32-bit game: theirs is exactly what it needs, so stand down.
+        let registry = Fake::with(&[&theirs.to_string_lossy()]);
+        let thirty_two = register(
+            &registry,
+            dir.path(),
+            "ReShade32.json",
+            Path::new("D:/Games/Two"),
+            32,
+        )
+        .expect("register");
+        assert!(
+            matches!(thirty_two, Registered::Foreign { .. }),
+            "{thirty_two:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_cannot_be_read_is_assumed_to_serve_everything() {
+        // The cautious direction: it makes us stand down and report a foreign
+        // registration rather than add a second one beside something we do not
+        // understand.
+        assert!(manifest_serves(r"C:\nowhere\ReShade.json", 64));
+        assert!(manifest_serves(r"C:\nowhere\ReShade.json", 32));
     }
 
     #[test]
@@ -862,6 +1066,7 @@ mod tests {
             dir.path(),
             "ReShade64.json",
             Path::new("D:/Games/One"),
+            64,
         )
         .expect("register");
         assert!(matches!(found, Registered::Added { .. }), "{found:?}");
@@ -896,6 +1101,7 @@ mod tests {
             dir.path(),
             "ReShade64.json",
             Path::new("D:/Games/One"),
+            64,
         )
         .expect_err("the write failed");
         assert_eq!(refused.code, Code::StateUnwritable);

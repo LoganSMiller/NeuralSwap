@@ -5,12 +5,16 @@
 //! machine - and, just as importantly, so the test suite cannot modify the
 //! developer's own Vulkan setup by accident. This is the other side.
 //!
-//! `HKCU` rather than `HKLM`: registering an implicit layer needs no
-//! administrator there, and it scopes the change to the person who asked for
-//! it rather than to everyone with an account on the machine.
+//! Writes go to `HKCU`: registering an implicit layer needs no administrator
+//! there, and it scopes the change to the person who asked for it rather than
+//! to everyone with an account on the machine.
+//!
+//! Reads come from **both** hives. ReShade's own installer writes `HKLM` when
+//! it is run elevated, so a reader that looks only at `HKCU` misses a
+//! registration the user already has - and then adds a second one beside it.
 
 use neuralswap_core::error::{fail, Code, Result};
-use neuralswap_core::install::layer::{LayerRegistry, REGISTRY_KEY};
+use neuralswap_core::install::layer::{LayerRegistry, Registration, REGISTRY_KEY};
 
 pub struct WindowsRegistry;
 
@@ -20,17 +24,41 @@ const ENABLED: u32 = 0;
 
 #[cfg(windows)]
 impl LayerRegistry for WindowsRegistry {
-    fn values(&self) -> Result<Vec<String>> {
-        // A key that does not exist is an empty list, not a failure: nothing
-        // has ever registered an implicit layer on this account, which is the
-        // normal state of a fresh machine.
-        let Ok(key) = windows_registry::CURRENT_USER.open(REGISTRY_KEY) else {
-            return Ok(Vec::new());
-        };
-        Ok(key
-            .values()
-            .map(|values| values.map(|(name, _)| name).collect())
-            .unwrap_or_default())
+    fn values(&self) -> Result<Vec<Registration>> {
+        // **Both hives.** `HKCU` is where this application registers, but
+        // ReShade's own installer writes `HKLM` when it is run elevated - so
+        // a reader that looks only at `HKCU` misses a registration the user
+        // already has, stands down for nothing, and then adds a second one
+        // beside it.
+        //
+        // A key that does not exist is an empty list rather than a failure:
+        // nothing has ever registered an implicit layer, which is the normal
+        // state of a fresh machine.
+        let mut found = Vec::new();
+        for (root, machine_wide) in [
+            (windows_registry::CURRENT_USER, false),
+            (windows_registry::LOCAL_MACHINE, true),
+        ] {
+            let Ok(key) = root.open(REGISTRY_KEY) else {
+                continue;
+            };
+            let Ok(values) = key.values() else {
+                continue;
+            };
+            for (name, _) in values {
+                // The loader reads the data as a `DWORD` and **only zero means
+                // enabled**. Anything else is registered but switched off, and
+                // treating one of those as working is how an install finishes,
+                // reports success, and leaves the game with no injector.
+                let enabled = key.get_u32(&name).is_ok_and(|value| value == 0);
+                found.push(Registration {
+                    value: name,
+                    enabled,
+                    machine_wide,
+                });
+            }
+        }
+        Ok(found)
     }
 
     fn add(&self, value: &str) -> Result<()> {
@@ -71,7 +99,7 @@ impl LayerRegistry for WindowsRegistry {
 
 #[cfg(not(windows))]
 impl LayerRegistry for WindowsRegistry {
-    fn values(&self) -> Result<Vec<String>> {
+    fn values(&self) -> Result<Vec<Registration>> {
         Ok(Vec::new())
     }
     fn add(&self, _value: &str) -> Result<()> {
@@ -99,7 +127,7 @@ mod tests {
         // setup.
         let found = WindowsRegistry.values().expect("reading must not fail");
         for value in &found {
-            assert!(!value.is_empty());
+            assert!(!value.value.is_empty());
         }
     }
 }

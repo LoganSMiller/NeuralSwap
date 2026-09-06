@@ -333,11 +333,19 @@ mod tests {
     }
 
     impl LayerRegistry for FakeRegistry {
-        fn values(&self) -> Result<Vec<String>> {
+        fn values(&self) -> Result<Vec<crate::install::layer::Registration>> {
             Ok(self
                 .values
                 .lock()
-                .map(|held| held.clone())
+                .map(|held| {
+                    held.iter()
+                        .map(|value| crate::install::layer::Registration {
+                            value: value.clone(),
+                            enabled: true,
+                            machine_wide: false,
+                        })
+                        .collect()
+                })
                 .unwrap_or_default())
         }
         fn add(&self, value: &str) -> Result<()> {
@@ -367,7 +375,7 @@ mod tests {
         std::fs::create_dir_all(&game).expect("game dir");
 
         let registry = FakeRegistry::default();
-        crate::install::layer::register(&registry, &shared, "ReShade64.json", &game)
+        crate::install::layer::register(&registry, &shared, "ReShade64.json", &game, 64)
             .expect("register");
         assert_eq!(registry.values().expect("values").len(), 1);
 
@@ -418,7 +426,7 @@ mod tests {
 
         let registry = FakeRegistry::default();
         for dir in [&game, &other] {
-            crate::install::layer::register(&registry, &shared, "ReShade64.json", dir)
+            crate::install::layer::register(&registry, &shared, "ReShade64.json", dir, 64)
                 .expect("register");
         }
 

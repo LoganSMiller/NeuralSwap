@@ -803,11 +803,19 @@ mod tests {
     }
 
     impl crate::install::layer::LayerRegistry for RecordingRegistry {
-        fn values(&self) -> Result<Vec<String>> {
+        fn values(&self) -> Result<Vec<crate::install::layer::Registration>> {
             Ok(self
                 .values
                 .lock()
-                .map(|held| held.clone())
+                .map(|held| {
+                    held.iter()
+                        .map(|value| crate::install::layer::Registration {
+                            value: value.clone(),
+                            enabled: true,
+                            machine_wide: false,
+                        })
+                        .collect()
+                })
                 .unwrap_or_default())
         }
         fn add(&self, value: &str) -> Result<()> {
@@ -842,7 +850,7 @@ mod tests {
         let registry = RecordingRegistry::default();
         // The state an install would have left: registered, and this game
         // counted as wanting it.
-        crate::install::layer::register(&registry, &shared, "ReShade64.json", &game)
+        crate::install::layer::register(&registry, &shared, "ReShade64.json", &game, 64)
             .expect("register");
         assert_eq!(registry.values().expect("values").len(), 1);
 
@@ -877,7 +885,7 @@ mod tests {
 
         let registry = RecordingRegistry::default();
         // Another game registered it earlier and still wants it.
-        crate::install::layer::register(&registry, &shared, "ReShade64.json", &other)
+        crate::install::layer::register(&registry, &shared, "ReShade64.json", &other, 64)
             .expect("register");
 
         let mut built = record(&game, Vec::new());

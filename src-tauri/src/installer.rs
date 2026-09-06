@@ -230,8 +230,15 @@ impl Installer {
         &self,
         game_dir: &Path,
         manifest: &str,
+        bitness: u8,
     ) -> Result<layer::Registered> {
-        layer::register(self.layers.as_ref(), &self.layer_dir(), manifest, game_dir)
+        layer::register(
+            self.layers.as_ref(),
+            &self.layer_dir(),
+            manifest,
+            game_dir,
+            bitness,
+        )
     }
 
     /// Stop counting `game_dir`, and deregister the layer if nothing else
@@ -281,8 +288,15 @@ mod tests {
     }
 
     impl layer::LayerRegistry for FakeRegistry {
-        fn values(&self) -> Result<Vec<String>> {
-            Ok(lock(&self.values).clone())
+        fn values(&self) -> Result<Vec<layer::Registration>> {
+            Ok(lock(&self.values)
+                .iter()
+                .map(|value| layer::Registration {
+                    value: value.clone(),
+                    enabled: true,
+                    machine_wide: false,
+                })
+                .collect())
         }
         fn add(&self, value: &str) -> Result<()> {
             lock(&self.values).push(value.to_owned());
@@ -321,11 +335,11 @@ mod tests {
         let two = Path::new("D:/Games/Two");
 
         assert!(matches!(
-            installer.register_vulkan_layer(one, "ReShade64.json"),
+            installer.register_vulkan_layer(one, "ReShade64.json", 64),
             Ok(layer::Registered::Added { first: true, .. })
         ));
         assert!(matches!(
-            installer.register_vulkan_layer(two, "ReShade64.json"),
+            installer.register_vulkan_layer(two, "ReShade64.json", 64),
             Ok(layer::Registered::AlreadyOurs { games: 2, .. })
         ));
 
