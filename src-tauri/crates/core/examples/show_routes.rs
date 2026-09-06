@@ -76,7 +76,13 @@ fn main() {
             .map(|entry| entry.file_name().to_string_lossy().to_lowercase())
             .collect();
 
-        let found = assess(&imports, &beside, has_native_dlss);
+        let found = assess(
+            &imports,
+            &beside,
+            has_native_dlss,
+            Some(candidate.bitness),
+            candidate.api.as_ref().map(|verdict| verdict.api),
+        );
         println!("\n{}", game.name);
         println!("  executable : {}", candidate.rel);
         println!("  integration: {:?}", found.integration);

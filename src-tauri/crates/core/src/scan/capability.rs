@@ -304,6 +304,27 @@ impl Feature {
         found
     }
 
+    /// What an FSR or XeSS integration feeds, stated in DLSS terms.
+    ///
+    /// A game with no DLSS feeds no DLSS feature, which is true and useless:
+    /// judged that way an FSR game looks identical to a game with no upscaler
+    /// at all, and [`Route::OptiScaler`] would be told there is nothing to
+    /// read. There is.
+    ///
+    /// FSR 2/3 and XeSS are temporal upscalers, and a temporal upscaler needs
+    /// the same class of resource DLSS super resolution does: depth, motion
+    /// vectors, the camera, and a jittered colour buffer with the offset that
+    /// produced it. That is not an analogy - it is why OptiScaler can take an
+    /// FSR call and satisfy it with DLSS at all. A renderer that could not
+    /// hand over those buffers could not be redirected.
+    ///
+    /// So the honest reading of an FSR or XeSS game is that it feeds super
+    /// resolution, and nothing beyond it. It says nothing about the G-buffer:
+    /// a game that upscales has no reason to tag albedo.
+    pub const fn fed_by_upscaler() -> Feature {
+        Feature::SuperResolution
+    }
+
     /// Whether a game that feeds `self` is thereby feeding everything `other`
     /// needs.
     ///
@@ -605,6 +626,76 @@ pub fn outlook(
         };
     }
 
+    // OptiScaler takes over the upscaler the game already runs, so the inputs
+    // are the game's own - it synthesises nothing. That makes it far closer to
+    // a native swap than to the fed routes, and treating it as fed would say
+    // two things that are plainly false of it: that the data is estimated, and
+    // that jitter cannot be had. A game with an upscaler is already jittering;
+    // that is what an upscaler does. So this route gets real upscaling where
+    // the feeder is always DLAA.
+    //
+    // What it does not do is invent the inputs the game never produced. A game
+    // that upscales but does not denoise still tags no albedo, and the pass
+    // runs over a colour buffer with the G-buffer absent rather than estimated.
+    if route == Route::OptiScaler {
+        let missing: Vec<Input> = feature
+            .inputs()
+            .into_iter()
+            .filter(|input| !game_feeds.iter().any(|have| have.inputs().contains(input)))
+            .collect();
+
+        // Reflex is the exception that does not soften. Frame generation needs
+        // the game itself to emit markers through Streamline, and taking over
+        // an upscaler call does not make a game start doing that - so DLSS
+        // frame generation is genuinely out of reach here, unlike everything
+        // else this route touches.
+        let needs_reflex = missing.contains(&Input::ReflexMarkers);
+
+        let (quality, note) = if fed_by_game {
+            (
+                Quality::Native,
+                format!(
+                    "{} runs on this game's own inputs: OptiScaler takes over the upscaler it \
+                     already calls, so nothing is estimated and the frame is genuinely \
+                     upscaled rather than rendered at full size.",
+                    feature.label()
+                ),
+            )
+        } else if needs_reflex {
+            (
+                Quality::OutOfReach,
+                format!(
+                    "{} needs this game to emit Reflex markers through Streamline, and taking \
+                     over its upscaler does not make it start.",
+                    feature.label()
+                ),
+            )
+        } else {
+            (
+                Quality::Estimated,
+                format!(
+                    "{} will run over the upscaled frame, but this game never produces {} - so \
+                     the pass works without them rather than on estimates of them.",
+                    feature.label(),
+                    list(&missing)
+                ),
+            )
+        };
+
+        return Outlook {
+            feature,
+            quality,
+            route,
+            estimated: Vec::new(),
+            out_of_reach: if needs_reflex { missing } else { Vec::new() },
+            note,
+            documented,
+            // OptiScaler is itself the thing that asks for the feature, so the
+            // route already carries the consumer the game does not provide.
+            needs_consumer_addon: None,
+        };
+    }
+
     // The bridge mirrors a real DLSS session, so the inputs it forwards are
     // the game's own. What it cannot do is invent inputs the game never had.
     if route == Route::Bridge {
@@ -736,6 +827,111 @@ mod tests {
             assert!(found.out_of_reach.is_empty());
             assert!(found.note.contains(feature.runtime()));
         }
+    }
+
+    #[test]
+    fn optiscaler_upscales_where_the_feeder_can_only_do_dlaa() {
+        // The reason the route exists, and the thing the fed-route treatment
+        // would get exactly backwards. A game with an upscaler is already
+        // jittering its sampling, so taking that upscaler over gets real
+        // upscaling - while the feeder, which cannot make a game jitter, is
+        // always DLAA at native resolution.
+        let opti = outlook(
+            Feature::SuperResolution,
+            Integration::None,
+            Route::OptiScaler,
+            &[Feature::SuperResolution],
+            Some(Generation::Blackwell),
+        );
+        let fed = outlook(
+            Feature::SuperResolution,
+            Integration::None,
+            Route::Feeder,
+            &[Feature::SuperResolution],
+            Some(Generation::Blackwell),
+        );
+
+        assert_eq!(opti.quality, Quality::Native);
+        assert!(opti.out_of_reach.is_empty());
+        // And the contrast is the point: same game, same feature, and the
+        // feeder still cannot upscale it.
+        assert_eq!(fed.quality, Quality::Estimated);
+        assert!(fed.note.contains("native resolution"), "{}", fed.note);
+    }
+
+    #[test]
+    fn optiscaler_is_its_own_consumer() {
+        // Every other route needs something added to ask for the feature. This
+        // route *is* that something, so reporting an add-on requirement here
+        // would tell the user to install a second copy of what they are
+        // already installing.
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::None,
+            Route::OptiScaler,
+            &[Feature::RayReconstruction],
+            Some(Generation::Blackwell),
+        );
+        assert_eq!(found.quality, Quality::Native);
+        assert!(found.needs_consumer_addon.is_none());
+    }
+
+    #[test]
+    fn taking_over_an_upscaler_does_not_make_a_game_emit_reflex() {
+        // The one thing this route cannot soften. Frame generation needs the
+        // game itself to emit Reflex markers through Streamline, and hooking
+        // its upscaler call does not make it start - so this stays a refusal
+        // rather than becoming an estimate.
+        let found = outlook(
+            Feature::FrameGeneration,
+            Integration::None,
+            Route::OptiScaler,
+            &[Feature::SuperResolution],
+            Some(Generation::Blackwell),
+        );
+        assert_eq!(found.quality, Quality::OutOfReach);
+        assert!(found.out_of_reach.contains(&Input::ReflexMarkers));
+        assert!(found.note.contains("Reflex"), "{}", found.note);
+    }
+
+    #[test]
+    fn a_missing_g_buffer_is_absent_rather_than_invented() {
+        // A game that upscales but does not denoise tags no albedo. The pass
+        // still runs - it is a pass over the upscaled frame - but saying it
+        // runs on estimates would claim OptiScaler synthesises a G-buffer,
+        // which it does not do.
+        let found = outlook(
+            Feature::NeuralRendering,
+            Integration::None,
+            Route::OptiScaler,
+            &[Feature::SuperResolution],
+            Some(Generation::Blackwell),
+        );
+        assert_eq!(found.quality, Quality::Estimated);
+        assert!(found.note.contains("albedo"), "{}", found.note);
+        assert!(
+            found.note.contains("without them"),
+            "absent, not estimated: {}",
+            found.note
+        );
+    }
+
+    #[test]
+    fn an_fsr_game_is_read_as_feeding_super_resolution() {
+        // Judged on DLSS features alone an FSR game feeds nothing, which is
+        // true and useless - it would make this route report that there is
+        // nothing to read from a game producing real depth and real vectors
+        // every frame.
+        assert_eq!(Feature::fed_by_upscaler(), Feature::SuperResolution);
+
+        let found = outlook(
+            Feature::SuperResolution,
+            Integration::None,
+            Route::OptiScaler,
+            &[Feature::fed_by_upscaler()],
+            Some(Generation::Blackwell),
+        );
+        assert_eq!(found.quality, Quality::Native);
     }
 
     #[test]

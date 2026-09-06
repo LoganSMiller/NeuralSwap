@@ -145,6 +145,10 @@ fn consumer_for(route: Route) -> Option<&'static str> {
         Route::NativeSwap => None,
         Route::Bridge => Some("dlss5-bridge"),
         Route::Feeder => Some("dlss5-feeder"),
+        // The proxy DLL, its ini and the neural pass arrive as one component,
+        // fetched from its own release page rather than bundled: OptiScaler is
+        // GPL-3.0 and this application is not.
+        Route::OptiScaler => Some("optiscaler"),
     }
 }
 
@@ -160,6 +164,12 @@ fn route_suggestion(route: Route) -> &'static str {
         }
         Route::Bridge | Route::Feeder => {
             "This route already manufactures what it can, so this feature is out of reach here."
+        }
+        // Not "out of reach here" - this route synthesises nothing, so a
+        // missing input is missing because the game never produced it, and
+        // the routes that invent inputs are still worth naming.
+        Route::OptiScaler => {
+            "This route uses the game's own inputs rather than inventing any, so the feeder              route is what remains - at lower quality."
         }
     }
 }

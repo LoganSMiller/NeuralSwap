@@ -58,7 +58,13 @@ fn main() {
             .map(|(dir, _)| dir.to_owned())
             .unwrap_or_default();
 
-        let found = assess(&imports, &beside, has_native_dlss);
+        let found = assess(
+            &imports,
+            &beside,
+            has_native_dlss,
+            Some(candidate.bitness),
+            candidate.api.as_ref().map(|verdict| verdict.api),
+        );
         // The footprint survey is of the directory the runtime goes into,
         // which is where another tool's files would be too.
         let survey = neuralswap_core::scan::footprints::survey(exe.parent().unwrap_or(&game.dir));
