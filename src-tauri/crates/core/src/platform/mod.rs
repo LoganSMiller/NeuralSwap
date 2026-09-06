@@ -5,6 +5,7 @@
 //! paths are on a real machine.
 
 pub mod driver_profile;
+pub mod fatbin;
 pub mod gpu;
 use std::path::PathBuf;
 
