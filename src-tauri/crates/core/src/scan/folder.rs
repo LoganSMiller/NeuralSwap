@@ -585,6 +585,7 @@ mod tests {
                 api,
                 label: label.to_owned(),
                 from_marker,
+                direct3d: None,
             }),
             size,
             file_version: None,

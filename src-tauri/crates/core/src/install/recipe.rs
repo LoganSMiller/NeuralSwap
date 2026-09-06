@@ -37,10 +37,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::components::catalog::{Catalog, Role};
-use crate::platform::gpu::Generation;
-use crate::scan::capability::{outlook, Feature, Quality};
+use crate::scan::capability::{outlook, Feature, Quality, Situation};
 use crate::scan::footprints::{Survey, Tool};
-use crate::scan::integration::{Integration, Route};
+use crate::scan::integration::Route;
 
 /// One component to install, in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,19 +191,17 @@ fn runtime_for(feature: Feature) -> &'static str {
 /// is a planner nobody can reproduce.
 pub fn build(
     catalog: &Catalog,
-    route: Route,
     wanted: &[Feature],
-    integration: Integration,
-    game_feeds: &[Feature],
     survey: &Survey,
-    card: Option<Generation>,
+    situation: &Situation<'_>,
 ) -> Recipe {
+    let route = situation.route;
     let mut delivers = Vec::new();
     let mut refuses = Vec::new();
     let mut roots: Vec<(String, String)> = Vec::new();
 
     for &feature in wanted {
-        let found = outlook(feature, integration, route, game_feeds, card);
+        let found = outlook(feature, situation);
         match found.quality {
             // Nothing installed here will make the card able to run it, and
             // nothing installed here will conjure an input the renderer never
@@ -519,7 +516,9 @@ fn clashes_with_disk(catalog: &Catalog, steps: &[Step], survey: &Survey) -> Vec<
 mod tests {
     use super::*;
     use crate::components::catalog::default_catalog;
+    use crate::platform::gpu::Generation;
     use crate::scan::footprints::Footprint;
+    use crate::scan::integration::Integration;
 
     fn nothing() -> Survey {
         Survey {
@@ -571,12 +570,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::Feeder,
             &[Feature::NeuralRendering],
-            Integration::None,
-            &[],
             &nothing(),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         assert!(recipe.is_runnable(), "{recipe:#?}");
@@ -605,12 +607,15 @@ mod tests {
         for route in [Route::Feeder, Route::Bridge] {
             let recipe = build(
                 &catalog,
-                route,
                 &Feature::ALL,
-                Integration::None,
-                &[],
                 &nothing(),
-                Some(Generation::Blackwell),
+                &Situation {
+                    integration: Integration::None,
+                    route,
+                    game_feeds: &[],
+                    card: Some(Generation::Blackwell),
+                    direct3d: None,
+                },
             );
 
             let consumers: Vec<&str> = recipe
@@ -639,12 +644,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::Feeder,
             &[Feature::FrameGeneration],
-            Integration::None,
-            &[],
             &nothing(),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         assert!(recipe.delivers.is_empty(), "{recipe:#?}");
@@ -670,12 +678,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::Feeder,
             &[Feature::NeuralRendering],
-            Integration::None,
-            &[],
             &loading(Tool::ReShade),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         let reshade = recipe
@@ -710,12 +721,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::Feeder,
             &[Feature::NeuralRendering],
-            Integration::None,
-            &[],
             &leftovers_of(Tool::ReShade),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         let reshade = recipe
@@ -740,12 +754,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::Feeder,
             &[Feature::NeuralRendering],
-            Integration::None,
-            &[],
             &loading(Tool::OptiScaler),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         let clash = recipe
@@ -771,12 +788,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::Bridge,
             &[Feature::NeuralRendering],
-            Integration::None,
-            &[Feature::RayReconstruction],
             &loading(Tool::OptiScaler),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Bridge,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         let clash = recipe
@@ -797,12 +817,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::Feeder,
             &[Feature::NeuralRendering],
-            Integration::None,
-            &[],
             &loading(Tool::ReShade),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         assert!(recipe.clashes.is_empty(), "{recipe:#?}");
@@ -817,12 +840,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::NativeSwap,
-            &[Feature::SuperResolution],
-            Integration::Streamline,
             &[Feature::SuperResolution],
             &nothing(),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &[Feature::SuperResolution],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         assert_eq!(
@@ -844,12 +870,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::NativeSwap,
             &[Feature::NeuralRendering],
-            Integration::Streamline,
-            &[Feature::RayReconstruction],
             &nothing(),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         assert!(position(&recipe, "nvngx-dlssnr").is_some(), "{recipe:#?}");
@@ -864,12 +893,15 @@ mod tests {
         let catalog = default_catalog();
         let recipe = build(
             &catalog,
-            Route::Feeder,
             &[Feature::NeuralRendering],
-            Integration::None,
-            &[],
             &nothing(),
-            Some(Generation::Ampere),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Ampere),
+                direct3d: None,
+            },
         );
 
         assert!(recipe.steps.is_empty(), "{recipe:#?}");
@@ -884,12 +916,15 @@ mod tests {
         for route in [Route::NativeSwap, Route::Bridge, Route::Feeder] {
             let recipe = build(
                 &catalog,
-                route,
                 &Feature::ALL,
-                Integration::None,
-                &[Feature::RayReconstruction],
                 &nothing(),
-                Some(Generation::Blackwell),
+                &Situation {
+                    integration: Integration::None,
+                    route,
+                    game_feeds: &[Feature::RayReconstruction],
+                    card: Some(Generation::Blackwell),
+                    direct3d: None,
+                },
             );
             for step in &recipe.steps {
                 assert!(!step.because.is_empty(), "{route:?} {}", step.component);
@@ -920,21 +955,27 @@ mod tests {
         let catalog = default_catalog();
         let once = build(
             &catalog,
-            Route::Feeder,
             &Feature::ALL,
-            Integration::None,
-            &[],
             &nothing(),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         let twice = build(
             &catalog,
-            Route::Feeder,
             &Feature::ALL,
-            Integration::None,
-            &[],
             &nothing(),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(once, twice);
     }

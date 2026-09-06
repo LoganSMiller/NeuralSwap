@@ -12,7 +12,7 @@ use neuralswap_core::components::catalog::default_catalog;
 use neuralswap_core::install::{placement, recipe};
 use neuralswap_core::jobs::Cancel;
 use neuralswap_core::pe::PeCache;
-use neuralswap_core::scan::capability::Feature;
+use neuralswap_core::scan::capability::{Feature, Situation};
 use neuralswap_core::scan::integration::assess;
 use neuralswap_core::scan::scan_folder;
 use neuralswap_core::{library, platform};
@@ -77,12 +77,15 @@ fn main() {
         };
         let built = recipe::build(
             &catalog,
-            route,
             &Feature::ALL,
-            found.integration,
-            &game_feeds,
             &survey,
-            card,
+            &Situation {
+                integration: found.integration,
+                route,
+                game_feeds: &game_feeds,
+                card,
+                direct3d: candidate.api.as_ref().and_then(|verdict| verdict.direct3d),
+            },
         );
 
         println!("\n{} - {:?} via {:?}", game.name, found.integration, route);

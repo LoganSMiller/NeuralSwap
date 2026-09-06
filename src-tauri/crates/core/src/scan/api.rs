@@ -57,6 +57,28 @@ impl fmt::Display for Api {
     }
 }
 
+/// Which Direct3D a DXGI game actually uses.
+///
+/// [`Api`] deliberately folds 10, 11 and 12 together, because the question it
+/// answers is "which proxy DLL does an injector install" and the answer for
+/// all three is `dxgi.dll`. This is the other question, and several things
+/// turn on it:
+///
+/// - `sl.dlss_g` and `sl.dlss_nr` list `d3d12, vk` in their manifests and
+///   refuse Direct3D 11 outright, so a feature can be fully fed by a D3D11
+///   game and still be unreachable.
+/// - AMD's FSR 3.1 frame generation is Direct3D 12 only.
+///
+/// This used to exist only as display text - the detection below knew perfectly
+/// well whether it had seen `d3d12.dll` and put the answer in a label for a
+/// human to read, where no logic could reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Direct3D {
+    Eleven,
+    Twelve,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Verdict {
@@ -66,6 +88,13 @@ pub struct Verdict {
     /// True when the verdict came from a string rather than the import table,
     /// which is weaker evidence and worth surfacing in diagnostics.
     pub from_marker: bool,
+    /// The Direct3D version, when it is known.
+    ///
+    /// `None` for a game that reaches DXGI without naming a device DLL: the
+    /// swapchain is evidence of Direct3D and says nothing about which one, and
+    /// guessing would be worse than admitting it.
+    #[serde(default)]
+    pub direct3d: Option<Direct3D>,
 }
 
 fn verdict(api: Api, label: &str, from_marker: bool) -> Verdict {
@@ -73,6 +102,15 @@ fn verdict(api: Api, label: &str, from_marker: bool) -> Verdict {
         api,
         label: label.to_owned(),
         from_marker,
+        direct3d: None,
+    }
+}
+
+/// A [`Verdict`] that also knows which Direct3D it saw.
+fn d3d_verdict(label: &str, level: Direct3D, from_marker: bool) -> Verdict {
+    Verdict {
+        direct3d: Some(level),
+        ..verdict(Api::Dxgi, label, from_marker)
     }
 }
 
@@ -105,10 +143,10 @@ pub fn detect(imports: &[String], markers: &[String]) -> Option<Verdict> {
     // Highest version first: a game importing both d3d11 and d3d12 is a D3D12
     // game with a fallback path, and the higher one is what it will use.
     if imported("d3d12.dll") {
-        return Some(verdict(Api::Dxgi, "DirectX 12", false));
+        return Some(d3d_verdict("DirectX 12", Direct3D::Twelve, false));
     }
     if imported("d3d11.dll") {
-        return Some(verdict(Api::Dxgi, "DirectX 11", false));
+        return Some(d3d_verdict("DirectX 11", Direct3D::Eleven, false));
     }
     if imported("d3d10.dll") || imported("d3d10_1.dll") {
         return Some(verdict(Api::D3d10, "DirectX 10", false));
@@ -138,10 +176,10 @@ fn detect_from_markers(markers: &[String]) -> Option<Verdict> {
     let has = |name: &str| markers.iter().any(|item| item == name);
 
     if has("D3D12CreateDevice") || has("D3D12SDKPath") || has("D3D12SDKVersion") {
-        return Some(verdict(Api::Dxgi, "DirectX 12", true));
+        return Some(d3d_verdict("DirectX 12", Direct3D::Twelve, true));
     }
     if has("D3D11CreateDevice") {
-        return Some(verdict(Api::Dxgi, "DirectX 11", true));
+        return Some(d3d_verdict("DirectX 11", Direct3D::Eleven, true));
     }
     if has("D3D10CreateDevice") {
         return Some(verdict(Api::D3d10, "DirectX 10", true));
@@ -170,6 +208,39 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_direct3d_version_is_recorded_rather_than_only_displayed() {
+        // It used to exist only inside the label, where a person could read it
+        // and no rule could. Several features refuse Direct3D 11 outright, so
+        // this has to be a value.
+        let twelve = detect(&names(&["d3d12.dll"]), &[]).expect("verdict");
+        assert_eq!(twelve.direct3d, Some(Direct3D::Twelve));
+
+        let eleven = detect(&names(&["d3d11.dll"]), &[]).expect("verdict");
+        assert_eq!(eleven.direct3d, Some(Direct3D::Eleven));
+
+        // Both are still the same proxy, which is what `api` answers.
+        assert_eq!(twelve.api, Api::Dxgi);
+        assert_eq!(eleven.api, Api::Dxgi);
+    }
+
+    #[test]
+    fn a_game_with_only_a_swapchain_admits_it_does_not_know() {
+        // DXGI without a versioned device DLL. The swapchain proves Direct3D
+        // and says nothing about which one, and guessing D3D12 here would
+        // offer features a D3D11 game cannot run.
+        let found = detect(&names(&["dxgi.dll"]), &[]).expect("verdict");
+        assert_eq!(found.api, Api::Dxgi);
+        assert_eq!(found.direct3d, None);
+    }
+
+    #[test]
+    fn a_marker_carries_the_version_as_well_as_the_import_does() {
+        let found = detect(&[], &names(&["D3D12CreateDevice"])).expect("verdict");
+        assert_eq!(found.direct3d, Some(Direct3D::Twelve));
+        assert!(found.from_marker);
     }
 
     #[test]

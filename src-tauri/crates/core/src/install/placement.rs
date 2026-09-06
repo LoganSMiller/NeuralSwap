@@ -393,19 +393,22 @@ mod tests {
     use crate::components::catalog::default_catalog;
     use crate::install::recipe;
     use crate::platform::gpu::Generation;
-    use crate::scan::capability::Feature;
+    use crate::scan::capability::{Feature, Situation};
     use crate::scan::footprints::Survey;
     use crate::scan::integration::{Integration, Route};
 
     fn feeder_recipe() -> Recipe {
         recipe::build(
             &default_catalog(),
-            Route::Feeder,
             &[Feature::NeuralRendering],
-            Integration::None,
-            &[],
             &Survey::default(),
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         )
     }
 

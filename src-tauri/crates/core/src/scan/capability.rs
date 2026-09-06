@@ -50,6 +50,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::platform::gpu::Generation;
+use crate::scan::api::Direct3D;
 use crate::scan::integration::{Integration, Route};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -493,14 +494,45 @@ pub struct Outlook {
     pub needs_consumer_addon: Option<String>,
 }
 
+/// Everything an outlook is decided from, other than the feature itself.
+///
+/// A struct rather than five positional arguments because it had grown to five
+/// and two of them were `Option`s of different meanings - and because both
+/// [`outlook`] and [`crate::install::recipe::build`] need exactly this set, so
+/// passing it as one value keeps them from drifting apart.
+///
+/// Everything here arrives from the caller. Nothing in this module reads the
+/// filesystem or the registry: an assessment that consults the machine is one
+/// nobody can reproduce in a test.
+#[derive(Debug, Clone, Copy)]
+pub struct Situation<'a> {
+    /// How the game reaches DLSS, if it does.
+    pub integration: Integration,
+    /// The route being considered.
+    pub route: Route,
+    /// Features the game itself drives, so the resources they tag are real.
+    pub game_feeds: &'a [Feature],
+    /// The card, or `None` when it could not be identified. Unknown is not
+    /// old, and is never grounds for refusing.
+    pub card: Option<Generation>,
+    /// The game's Direct3D version where it is known. `None` means unknown
+    /// rather than old, and is treated the same way as an unknown card.
+    pub direct3d: Option<Direct3D>,
+}
+
 /// What each feature would look like in this game, on this route.
-pub fn outlook(
-    feature: Feature,
-    _integration: Integration,
-    route: Route,
-    game_feeds: &[Feature],
-    card: Option<Generation>,
-) -> Outlook {
+pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
+    let &Situation {
+        route,
+        game_feeds,
+        card,
+        direct3d,
+        // Recorded for callers and for the reason strings, but nothing here
+        // branches on it: what a game *feeds* is the evidence that matters,
+        // and how it reaches DLSS is already folded into that.
+        integration: _,
+    } = situation;
+
     let documented = feature.requirements_documented();
     let fed_by_game = game_feeds.iter().any(|have| have.satisfies(feature));
     // A feature the game does not itself request needs something to request it
@@ -516,6 +548,35 @@ pub fn outlook(
             feature.label()
         )
     });
+
+    // The graphics API gate, decided alongside the hardware one and for the
+    // same reason: what a game feeds is beside the point if the plugin refuses
+    // to load at all. `sl.dlss_g` and `sl.dlss_nr` list `d3d12, vk` in their
+    // manifests, so on Direct3D 11 they are unreachable however complete the
+    // game's integration is - a D3D11 game that feeds ray reconstruction was
+    // being told neural rendering would run natively, and it would not run.
+    //
+    // Only the routes that host Streamline in the game's own process are bound
+    // by this. The bridge exists precisely to escape it: it mirrors the session
+    // onto a private Direct3D 12 device, which is why a DX11 game with DLSS is
+    // offered it in the first place.
+    let hosted_in_process = matches!(route, Route::NativeSwap | Route::OptiScaler);
+    if hosted_in_process && feature.requires_modern_rhi() && direct3d == Some(Direct3D::Eleven) {
+        return Outlook {
+            feature,
+            quality: Quality::OutOfReach,
+            route,
+            estimated: Vec::new(),
+            out_of_reach: Vec::new(),
+            note: format!(
+                "{} is implemented by {}, which runs only on Direct3D 12 and Vulkan - and this                  game is Direct3D 11. Bridging its DLSS onto a private Direct3D 12 session is                  the route that gets past that.",
+                feature.label(),
+                feature.streamline_plugin().0
+            ),
+            documented,
+            needs_consumer_addon,
+        };
+    }
 
     // The hardware gate is independent of the input contract and is decided
     // first: what a game feeds is beside the point if the card cannot execute
@@ -785,15 +846,10 @@ pub fn outlook(
 }
 
 /// Every feature's outlook, best prospects first.
-pub fn all_outlooks(
-    integration: Integration,
-    route: Route,
-    game_feeds: &[Feature],
-    card: Option<Generation>,
-) -> Vec<Outlook> {
+pub fn all_outlooks(situation: &Situation<'_>) -> Vec<Outlook> {
     let mut found: Vec<Outlook> = Feature::ALL
         .iter()
-        .map(|feature| outlook(*feature, integration, route, game_feeds, card))
+        .map(|feature| outlook(*feature, situation))
         .collect();
     found.sort_by_key(|entry| (entry.quality, entry.feature));
     found
@@ -817,16 +873,96 @@ mod tests {
         for feature in Feature::ALL {
             let found = outlook(
                 feature,
-                Integration::Streamline,
-                Route::NativeSwap,
-                &Feature::ALL,
-                Some(Generation::Blackwell),
+                &Situation {
+                    integration: Integration::Streamline,
+                    route: Route::NativeSwap,
+                    game_feeds: &Feature::ALL,
+                    card: Some(Generation::Blackwell),
+                    direct3d: None,
+                },
             );
             assert_eq!(found.quality, Quality::Native, "{feature:?}");
             assert!(found.estimated.is_empty());
             assert!(found.out_of_reach.is_empty());
             assert!(found.note.contains(feature.runtime()));
         }
+    }
+
+    #[test]
+    fn a_direct3d_11_game_cannot_reach_the_plugins_that_refuse_it() {
+        // sl.dlss_nr lists "d3d12, vk". A D3D11 game that feeds ray
+        // reconstruction produces everything neural rendering consumes, so it
+        // was reported as native - a complete input contract and a plugin that
+        // will not load, which is a confident wrong answer of the worst kind.
+        let found = outlook(
+            Feature::NeuralRendering,
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &[Feature::RayReconstruction, Feature::NeuralRendering],
+                card: Some(Generation::Blackwell),
+                direct3d: Some(Direct3D::Eleven),
+            },
+        );
+        assert_eq!(found.quality, Quality::OutOfReach);
+        assert!(found.note.contains("sl.dlss_nr"), "{}", found.note);
+    }
+
+    #[test]
+    fn the_rule_applies_only_to_the_plugins_that_actually_refuse() {
+        // The mistake to avoid is the one already made once in this module,
+        // where sl.dlss_d was assumed to be D3D12-only by analogy with
+        // sl.dlss_g. Its manifest says "d3d11, d3d12, vk", and so does
+        // sl.dlss - so neither may be refused on a D3D11 game.
+        for feature in [Feature::SuperResolution, Feature::RayReconstruction] {
+            let found = outlook(
+                feature,
+                &Situation {
+                    integration: Integration::Streamline,
+                    route: Route::NativeSwap,
+                    game_feeds: &Feature::ALL,
+                    card: Some(Generation::Blackwell),
+                    direct3d: Some(Direct3D::Eleven),
+                },
+            );
+            assert_eq!(found.quality, Quality::Native, "{feature:?}");
+        }
+    }
+
+    #[test]
+    fn the_bridge_is_how_a_direct3d_11_game_gets_past_it() {
+        // The whole reason that route exists: the session is mirrored onto a
+        // private D3D12 device, so the plugin's D3D12 requirement is met by
+        // the bridge rather than by the game.
+        let found = outlook(
+            Feature::NeuralRendering,
+            &Situation {
+                integration: Integration::None,
+                route: Route::Bridge,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: Some(Direct3D::Eleven),
+            },
+        );
+        assert_eq!(found.quality, Quality::Mirrored);
+    }
+
+    #[test]
+    fn an_unknown_direct3d_version_reports_rather_than_refuses() {
+        // A game that reaches DXGI without naming a device DLL. Not knowing
+        // which Direct3D it is cannot be grounds for refusing, or every game
+        // that resolves its renderer at startup would be told no.
+        let found = outlook(
+            Feature::NeuralRendering,
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &[Feature::RayReconstruction, Feature::NeuralRendering],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
+        );
+        assert_eq!(found.quality, Quality::Native);
     }
 
     #[test]
@@ -838,17 +974,23 @@ mod tests {
         // always DLAA at native resolution.
         let opti = outlook(
             Feature::SuperResolution,
-            Integration::None,
-            Route::OptiScaler,
-            &[Feature::SuperResolution],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::SuperResolution],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         let fed = outlook(
             Feature::SuperResolution,
-            Integration::None,
-            Route::Feeder,
-            &[Feature::SuperResolution],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[Feature::SuperResolution],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         assert_eq!(opti.quality, Quality::Native);
@@ -867,10 +1009,13 @@ mod tests {
         // already installing.
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::None,
-            Route::OptiScaler,
-            &[Feature::RayReconstruction],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Native);
         assert!(found.needs_consumer_addon.is_none());
@@ -884,10 +1029,13 @@ mod tests {
         // rather than becoming an estimate.
         let found = outlook(
             Feature::FrameGeneration,
-            Integration::None,
-            Route::OptiScaler,
-            &[Feature::SuperResolution],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::SuperResolution],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::OutOfReach);
         assert!(found.out_of_reach.contains(&Input::ReflexMarkers));
@@ -902,10 +1050,13 @@ mod tests {
         // which it does not do.
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::None,
-            Route::OptiScaler,
-            &[Feature::SuperResolution],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::SuperResolution],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Estimated);
         assert!(found.note.contains("albedo"), "{}", found.note);
@@ -926,10 +1077,13 @@ mod tests {
 
         let found = outlook(
             Feature::SuperResolution,
-            Integration::None,
-            Route::OptiScaler,
-            &[Feature::fed_by_upscaler()],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::fed_by_upscaler()],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Native);
     }
@@ -946,10 +1100,13 @@ mod tests {
         // and "what do I have to install".
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &[Feature::RayReconstruction],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Native, "the data is real");
         let reason = found
@@ -972,10 +1129,13 @@ mod tests {
         // user to install a consumer their game does not need.
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &[Feature::NeuralRendering, Feature::RayReconstruction],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &[Feature::NeuralRendering, Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
 
         assert_eq!(found.quality, Quality::Native);
@@ -1033,10 +1193,13 @@ mod tests {
         // which makes this the same network at native resolution.
         let found = outlook(
             Feature::SuperResolution,
-            Integration::None,
-            Route::Feeder,
-            &[],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Estimated);
         assert!(found.out_of_reach.contains(&Input::JitteredColor));
@@ -1052,10 +1215,13 @@ mod tests {
         // inputs are invented is the honest version of "results vary".
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::None,
-            Route::Feeder,
-            &[],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Estimated);
         for input in [
@@ -1072,10 +1238,13 @@ mod tests {
     fn the_bridge_supplies_real_data_rather_than_estimates() {
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::None,
-            Route::Bridge,
-            &[],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Bridge,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Mirrored);
         assert!(found.estimated.is_empty());
@@ -1093,10 +1262,13 @@ mod tests {
         // would have promised something impossible.
         let found = outlook(
             Feature::FrameGeneration,
-            Integration::None,
-            Route::Feeder,
-            &[],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::None,
+                route: Route::Feeder,
+                game_feeds: &[],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::OutOfReach);
         assert!(found.out_of_reach.contains(&Input::ReflexMarkers));
@@ -1135,20 +1307,22 @@ mod tests {
 
     #[test]
     fn outlooks_are_ordered_with_the_best_prospects_first() {
-        let native = all_outlooks(
-            Integration::Streamline,
-            Route::NativeSwap,
-            &Feature::ALL,
-            Some(Generation::Blackwell),
-        );
+        let native = all_outlooks(&Situation {
+            integration: Integration::Streamline,
+            route: Route::NativeSwap,
+            game_feeds: &Feature::ALL,
+            card: Some(Generation::Blackwell),
+            direct3d: None,
+        });
         assert!(native.iter().all(|entry| entry.quality == Quality::Native));
 
-        let fed = all_outlooks(
-            Integration::None,
-            Route::Feeder,
-            &[],
-            Some(Generation::Blackwell),
-        );
+        let fed = all_outlooks(&Situation {
+            integration: Integration::None,
+            route: Route::Feeder,
+            game_feeds: &[],
+            card: Some(Generation::Blackwell),
+            direct3d: None,
+        });
         assert_eq!(fed.len(), 4);
 
         // Not everything degrades gracefully, and an earlier version of this
@@ -1192,10 +1366,13 @@ mod tests {
         let feeds = [Feature::SuperResolution];
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &feeds,
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &feeds,
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::OutOfReach);
         assert!(found.out_of_reach.contains(&Input::Albedo));
@@ -1204,10 +1381,13 @@ mod tests {
         // Super resolution itself is of course fine.
         let same = outlook(
             Feature::SuperResolution,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &feeds,
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &feeds,
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(same.quality, Quality::Native);
     }
@@ -1225,10 +1405,13 @@ mod tests {
 
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &[Feature::RayReconstruction],
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Native);
     }
@@ -1269,10 +1452,13 @@ mod tests {
         // rather than as already working.
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &feeds,
-            Some(Generation::Blackwell),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &feeds,
+                card: Some(Generation::Blackwell),
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::OutOfReach);
     }
@@ -1309,10 +1495,13 @@ mod tests {
         // generation, which needs the optical flow accelerator Ada introduced.
         let turing = outlook(
             Feature::FrameGeneration,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &Feature::ALL,
-            Some(Generation::Turing),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &Feature::ALL,
+                card: Some(Generation::Turing),
+                direct3d: None,
+            },
         );
         assert_eq!(turing.quality, Quality::HardwareTooOld);
         assert!(turing.note.contains("RTX 40-series"));
@@ -1320,20 +1509,26 @@ mod tests {
         // The same game and the same route on an Ada card is fine.
         let ada = outlook(
             Feature::FrameGeneration,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &Feature::ALL,
-            Some(Generation::Ada),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &Feature::ALL,
+                card: Some(Generation::Ada),
+                direct3d: None,
+            },
         );
         assert_eq!(ada.quality, Quality::Native);
 
         // Neural rendering is gated higher still.
         let nr_on_ada = outlook(
             Feature::NeuralRendering,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &Feature::ALL,
-            Some(Generation::Ada),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &Feature::ALL,
+                card: Some(Generation::Ada),
+                direct3d: None,
+            },
         );
         assert_eq!(nr_on_ada.quality, Quality::HardwareTooOld);
     }
@@ -1344,10 +1539,13 @@ mod tests {
         // to identify hardware is not evidence that it is too old.
         let found = outlook(
             Feature::NeuralRendering,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &Feature::ALL,
-            None,
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &Feature::ALL,
+                card: None,
+                direct3d: None,
+            },
         );
         assert_eq!(found.quality, Quality::Native);
 
@@ -1355,10 +1553,13 @@ mod tests {
         // the same path.
         let unknown = outlook(
             Feature::NeuralRendering,
-            Integration::Streamline,
-            Route::NativeSwap,
-            &Feature::ALL,
-            Some(Generation::Unknown),
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::NativeSwap,
+                game_feeds: &Feature::ALL,
+                card: Some(Generation::Unknown),
+                direct3d: None,
+            },
         );
         assert_eq!(unknown.quality, Quality::Native);
     }

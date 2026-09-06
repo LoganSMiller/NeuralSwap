@@ -97,15 +97,17 @@ fn main() {
         );
         println!("  because    : {}", found.reason);
 
-        for entry in neuralswap_core::scan::capability::all_outlooks(
-            found.integration,
-            *found
+        let situation = neuralswap_core::scan::capability::Situation {
+            integration: found.integration,
+            route: *found
                 .routes
                 .first()
                 .unwrap_or(&neuralswap_core::scan::Route::Feeder),
-            &game_feeds,
+            game_feeds: &game_feeds,
             card,
-        ) {
+            direct3d: candidate.api.as_ref().and_then(|verdict| verdict.direct3d),
+        };
+        for entry in neuralswap_core::scan::capability::all_outlooks(&situation) {
             println!(
                 "    {:<18} {:?}  {}",
                 entry.feature.label(),
