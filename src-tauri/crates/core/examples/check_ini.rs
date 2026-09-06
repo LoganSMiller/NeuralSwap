@@ -11,7 +11,9 @@
 
 use std::fs;
 
-use neuralswap_core::install::ini;
+use neuralswap_core::install::optiscaler::{self, Options};
+use neuralswap_core::scan::api::Direct3D;
+use neuralswap_core::scan::capability::{Feature, Substitute};
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {
@@ -23,17 +25,23 @@ fn main() {
         return;
     };
 
-    // What the OptiScaler route writes to turn FSR 3.1 frame generation on.
-    let after = ini::set(
-        &before,
-        "FrameGen",
-        &[
-            ("Enabled", "true"),
-            ("FGInput", "upscaler"),
-            ("FGOutput", "fsrfg"),
-        ],
+    // The real decision path rather than a hand-written key list, so this
+    // exercises what an install would actually write: a Direct3D 12 game with
+    // its own DLSS, wanting the neural pass and frame generation.
+    let settings = optiscaler::settings_for(
+        &[Feature::NeuralRendering, Feature::FrameGeneration],
+        None,
+        Some(Substitute::FsrFrameGeneration),
+        Some(Direct3D::Twelve),
+        Options::default(),
     );
-    let after = ini::set(&after, "OptiFG", &[("HUDFix", "true")]);
+    for setting in &settings {
+        println!(
+            "  set    [{}] {} = {}",
+            setting.section, setting.key, setting.value
+        );
+    }
+    let after = optiscaler::write_into(&before, &settings);
 
     let old: Vec<&str> = before.lines().collect();
     let new: Vec<&str> = after.lines().collect();

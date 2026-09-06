@@ -33,6 +33,7 @@ pub mod ini;
 pub mod journal;
 pub mod layer;
 pub mod manifest;
+pub mod optiscaler;
 pub mod package;
 pub mod placement;
 pub mod plan;
