@@ -196,6 +196,54 @@ const LOADER_PROXIES: [&str; 4] = ["version.dll", "dinput8.dll", "winmm.dll", "d
 /// not by the host's - a 32-bit game loads a 32-bit injector or nothing.
 const RESHADE_VULKAN_LAYER: &str = "VK_LAYER_reshade";
 
+/// The file inside OptiScaler's package, and the catalogue id that carries it.
+const OPTISCALER: &str = "optiscaler";
+const OPTISCALER_DLL: &str = "OptiScaler.dll";
+
+/// Names OptiScaler can take, in the order its own setup offers them.
+///
+/// A different list from [`LOADER_PROXIES`] on purpose: this one leads with
+/// `dxgi.dll` because that is what a Direct3D game loads, and it includes
+/// `d3d12.dll` and the two network libraries while excluding `dinput8.dll`.
+/// Copying OptiScaler in under its own name does nothing at all - the whole
+/// mechanism is that the game's loader resolves one of these and gets it
+/// instead.
+///
+/// Its setup's own notes on when to reach past the first:
+///
+/// ```text
+/// dxgi.dll      default - most Direct3D 11 and 12 games
+/// winmm.dll     when the game ships its own dxgi.dll, or dxgi does nothing
+/// version.dll   another loader hook; try after winmm
+/// dbghelp.dll   loads very early - some Unreal Engine titles need this
+/// d3d12.dll     Direct3D 12 only, and only if dxgi is already taken
+/// wininet.dll   last resort
+/// winhttp.dll   last resort
+/// ```
+const OPTISCALER_PROXIES: [&str; 7] = [
+    "dxgi.dll",
+    "winmm.dll",
+    "version.dll",
+    "dbghelp.dll",
+    "d3d12.dll",
+    "wininet.dll",
+    "winhttp.dll",
+];
+
+/// The name OptiScaler should take for this executable.
+///
+/// Preferring a name the game actually imports, for the reason the loader
+/// proxy does: a proxy the game never loads is a file that sits there doing
+/// nothing, which is indistinguishable to a user from the tool being broken.
+/// `dxgi.dll` is the fallback rather than a deduction - it covers Direct3D 10,
+/// 11 and 12, which is nearly every game this route accepts.
+fn optiscaler_proxy(target: &Target<'_>) -> &'static str {
+    OPTISCALER_PROXIES
+        .into_iter()
+        .find(|name| target.imports.iter().any(|import| import == name))
+        .unwrap_or(OPTISCALER_PROXIES[0])
+}
+
 fn reshade_dll(bitness: u8) -> &'static str {
     if bitness == 32 {
         "ReShade32.dll"
@@ -333,6 +381,21 @@ fn place(
             dir: join(dir, "reshade-shaders"),
         },
 
+        // OptiScaler is a proxy as much as ReShade is, and copying it in under
+        // its own name is the one arrangement that certainly does nothing: the
+        // entire mechanism is the game's loader resolving one of the names in
+        // OPTISCALER_PROXIES and getting this instead.
+        //
+        // It is not Role::Injector because that arm is ReShade's - the file
+        // names, the Vulkan layer and the manifest are all ReShade's - and
+        // widening it would make two components share one set of answers that
+        // is only right for one of them.
+        Role::Compat if step.component == OPTISCALER => Delivery::Proxy {
+            dir: dir.to_owned(),
+            as_name: optiscaler_proxy(target).to_owned(),
+            from: OPTISCALER_DLL.to_owned(),
+        },
+
         // Add-ons, ASI plugins, runtimes and compatibility layers all sit
         // beside the executable: the add-on because ReShade looks for it
         // there, the runtime because NGX does.
@@ -426,6 +489,79 @@ mod tests {
             .iter()
             .find(|item| item.component == id)
             .unwrap_or_else(|| panic!("{id} was not placed"))
+    }
+
+    fn optiscaler_recipe() -> Recipe {
+        recipe::build(
+            &default_catalog(),
+            &[Feature::NeuralRendering],
+            &Survey::default(),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: Some(crate::scan::api::Direct3D::Twelve),
+            },
+        )
+    }
+
+    fn optiscaler_placement(imports: &[String]) -> Delivery {
+        let recipe = optiscaler_recipe();
+        let target = Target {
+            bitness: 64,
+            api: Some(Api::Dxgi),
+            imports,
+        };
+        plan(&default_catalog(), &recipe, "bin/x64", &target)
+            .into_iter()
+            .find(|item| item.component == "optiscaler")
+            .expect("optiscaler is placed")
+            .delivery
+    }
+
+    #[test]
+    fn optiscaler_is_renamed_rather_than_copied_in() {
+        // Copying it in as OptiScaler.dll is the one arrangement guaranteed to
+        // do nothing: the game's loader has no reason to open that name. It
+        // has to take a name the executable resolves.
+        let delivery = optiscaler_placement(&[]);
+
+        match delivery {
+            Delivery::Proxy { as_name, from, .. } => {
+                assert_eq!(from, "OptiScaler.dll");
+                // No imports to go on, so the default that covers Direct3D
+                // 10, 11 and 12.
+                assert_eq!(as_name, "dxgi.dll");
+            }
+            other => panic!("a copy would never load: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optiscaler_prefers_a_name_the_game_actually_imports() {
+        // A game that ships its own dxgi.dll is the case its setup names, and
+        // the reason the list has an order rather than a single default.
+        let imports = ["winmm.dll".to_owned(), "kernel32.dll".to_owned()];
+        match optiscaler_placement(&imports) {
+            Delivery::Proxy { as_name, .. } => assert_eq!(as_name, "winmm.dll"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn optiscaler_takes_the_first_of_its_own_order_that_fits() {
+        // dxgi leads the list, so a game importing both gets dxgi rather than
+        // whichever happens to appear first in the import table.
+        let imports = [
+            "d3d12.dll".to_owned(),
+            "winmm.dll".to_owned(),
+            "dxgi.dll".to_owned(),
+        ];
+        match optiscaler_placement(&imports) {
+            Delivery::Proxy { as_name, .. } => assert_eq!(as_name, "dxgi.dll"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
