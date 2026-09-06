@@ -847,6 +847,78 @@ mod tests {
     }
 
     #[test]
+    fn the_optiscaler_route_installs_optiscaler_and_no_reshade() {
+        // The point of the route, and the thing to check actually resolves:
+        // `consumer_for` names a catalogue id, and a name with no component
+        // behind it is skipped in silence - a recipe that promises delivery
+        // and installs nothing for the route it chose.
+        let catalog = default_catalog();
+        let recipe = build(
+            &catalog,
+            &[Feature::NeuralRendering],
+            &nothing(),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: Some(crate::scan::api::Direct3D::Twelve),
+            },
+        );
+
+        let installed: Vec<&str> = recipe
+            .steps
+            .iter()
+            .map(|step| step.component.as_str())
+            .collect();
+        assert!(installed.contains(&"optiscaler"), "{installed:?}");
+        assert!(installed.contains(&"nvngx-dlssnr"), "{installed:?}");
+        assert!(
+            !installed.contains(&"reshade"),
+            "no ReShade is the whole point: {installed:?}"
+        );
+        assert!(
+            !installed.contains(&"dlss5-feeder"),
+            "the feeder is what this route replaces: {installed:?}"
+        );
+        assert!(recipe.is_runnable());
+    }
+
+    #[test]
+    fn substituted_frame_generation_installs_no_dlss_runtime() {
+        // It is delivered by libraries inside OptiScaler's own package, so
+        // nvngx_dlssg.dll would be a file in the folder that nothing loads -
+        // and one the user is shown in the plan and charged the download for.
+        let catalog = default_catalog();
+        let recipe = build(
+            &catalog,
+            &[Feature::FrameGeneration],
+            &nothing(),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::SuperResolution],
+                card: Some(Generation::Blackwell),
+                direct3d: Some(crate::scan::api::Direct3D::Twelve),
+            },
+        );
+
+        let installed: Vec<&str> = recipe
+            .steps
+            .iter()
+            .map(|step| step.component.as_str())
+            .collect();
+        assert!(!installed.contains(&"nvngx-dlssg"), "{installed:?}");
+        assert!(installed.contains(&"optiscaler"), "{installed:?}");
+        // And it is delivered rather than refused, which is the change.
+        assert!(recipe
+            .delivers
+            .iter()
+            .any(|entry| entry.feature == Feature::FrameGeneration));
+        assert!(recipe.refuses.is_empty(), "{:?}", recipe.refuses);
+    }
+
+    #[test]
     fn a_native_swap_installs_files_and_not_an_injector() {
         // A game that already feeds the feature needs its runtime replaced and
         // nothing else. Pulling in ReShade here would be overhead for no

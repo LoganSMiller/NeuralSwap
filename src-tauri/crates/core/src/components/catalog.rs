@@ -561,10 +561,21 @@ pub fn default_catalog() -> Catalog {
     ));
 
     // ------------------------------------------------------------- upscalers
+    //
+    // This one carries a whole route: `Route::OptiScaler` takes over the
+    // upscaler a game already calls and runs the neural pass over its output.
+    // It is the only route here that needs no ReShade, and the only one that
+    // gets real upscaling rather than DLAA, because the game it hooks is
+    // already jittering its sampling.
+    //
+    // GPL-3.0, so it is fetched from its own release page and never bundled -
+    // not a formality, since bundling it would put this application's own
+    // distribution under terms it is not published under.
     components.push(component(
         "optiscaler",
         "OptiScaler (neural rendering build)",
-        "Swaps one upscaler for another in games that only offer one, and can carry neural rendering with it.",
+        "Takes over a game's own DLSS, FSR 2/3 or XeSS calls and runs neural rendering over the \
+         result - real upscaling, and no ReShade. DirectX 11 and 12, 64-bit.",
         Role::Compat,
         Licence::Gpl3,
         "https://github.com/Dagherbou/OptiScaler_DLSSNR",
