@@ -1,0 +1,17 @@
+{
+  "note": "Every preflight CheckName, in the order the checks run. The Rust `CheckName` enum must produce exactly this list through `as_str()`, and every name here must have a label in `src/shared/checks.ts`.",
+  "names": [
+    "gameDirectory",
+    "storeProtected",
+    "pathSafety",
+    "writable",
+    "filesInUse",
+    "diskSpace",
+    "sourceFiles",
+    "graphicsCard",
+    "otherTools",
+    "driverOverride",
+    "antiCheat",
+    "remixMod"
+  ]
+}

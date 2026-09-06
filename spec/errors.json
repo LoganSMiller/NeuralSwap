@@ -28,6 +28,7 @@
     "insufficientSpace",
     "verifyFailed",
     "planStale",
-    "antiCheatPresent"
+    "antiCheatPresent",
+    "remixRuntimePresent"
   ]
 }

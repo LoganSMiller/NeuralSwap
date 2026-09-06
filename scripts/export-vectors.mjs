@@ -31,6 +31,7 @@ import { buildPlan } from '../src/core/install/plan.ts';
 import { decideRecovery } from '../src/core/install/recover.ts';
 import { relate } from '../src/core/install/version.ts';
 import { AppError, ERROR_CODES } from '../src/shared/errors.ts';
+import { CHECK_NAMES } from '../src/shared/checks.ts';
 import { buildZip } from '../test/fixtures/zipbuild.ts';
 import { buildPe } from '../test/fixtures/pebuild.ts';
 
@@ -120,6 +121,20 @@ writeJson('errors.json', {
   note:
     'Every ErrorCode, in declaration order. The Rust `Code` enum must produce exactly this set through `as_str()`, and the TypeScript `ErrorCode` union must contain exactly these members. A code in one and not the other is the bug this file exists to catch.',
   codes: ERROR_CODES
+});
+
+// ------------------------------------------------------------------ checks
+
+// Every preflight check the UI has a label for.
+//
+// The same failure as errors.json, found the same way: `driverOverride` and
+// `antiCheat` were added to the Rust enum and never to the label map, so the
+// UI fell back to printing the wire name at a user. A check the user cannot
+// read is a check that cannot be acted on.
+writeJson('checks.json', {
+  note:
+    'Every preflight CheckName, in the order the checks run. The Rust `CheckName` enum must produce exactly this list through `as_str()`, and every name here must have a label in `src/shared/checks.ts`.',
+  names: CHECK_NAMES
 });
 
 // ------------------------------------------------------------------ zip

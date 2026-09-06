@@ -52,7 +52,11 @@ export const ERROR_CODES = [
   // consequence is irreversible - an injected add-on can get an account
   // banned - so it blocks by default and takes an explicit acknowledgement
   // to get past.
-  'antiCheatPresent'
+  'antiCheatPresent',
+  // This game has an RTX Remix mod. Every route here injects ReShade, which
+  // crashes a Remix game before it draws - and on DirectX 9 would write over
+  // the Remix runtime itself.
+  'remixRuntimePresent'
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

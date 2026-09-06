@@ -39,6 +39,44 @@ fn outcome<T>(result: neuralswap_core::Result<T>) -> String {
 }
 
 #[test]
+fn check_names_match_the_typescript_labels() {
+    // Same failure as the error codes, found the same way. `driverOverride`
+    // and `antiCheat` were added to the Rust enum and never to the UI's label
+    // map, so a user got the wire name where a sentence belonged. The UI
+    // cannot know a check exists until it is handed one, which is too late.
+    let table = read_table("checks.json");
+    let expected: Vec<String> = table["names"]
+        .as_array()
+        .expect("names")
+        .iter()
+        .map(|name| name.as_str().expect("a string name").to_owned())
+        .collect();
+
+    let ours: Vec<String> = neuralswap_core::install::preflight::CheckName::ALL
+        .iter()
+        .map(|name| name.as_str().to_owned())
+        .collect();
+
+    assert_eq!(ours, expected);
+}
+
+#[test]
+fn a_check_name_spells_itself_the_same_way_serde_does() {
+    // `as_str` is hand-written and serde's camelCase is derived, and it is the
+    // derived one that reaches the UI. If they disagree, the pin above passes
+    // while the actual payload carries a name the UI has no label for - which
+    // is precisely the bug it is meant to prevent, wearing a disguise.
+    for name in neuralswap_core::install::preflight::CheckName::ALL {
+        let wire = serde_json::to_value(name).expect("serialize");
+        assert_eq!(
+            wire.as_str().expect("a string"),
+            name.as_str(),
+            "{name:?} serializes differently from as_str()"
+        );
+    }
+}
+
+#[test]
 fn error_codes_match_the_typescript_union() {
     // The two lists drifted once already: `hardwareUnsupported` was a Rust
     // code with no member in `ErrorCode`, so the UI could be handed a code it

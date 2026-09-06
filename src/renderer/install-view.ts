@@ -1,4 +1,5 @@
 import { badge, fileSize } from './bridge.ts';
+import { CHECK_LABELS, type CheckName } from '../shared/checks.ts';
 import type {
   Check,
   Integrity,
@@ -50,17 +51,6 @@ const WARNINGS: Record<string, { title: string; why: string }> = {
   },
 };
 
-const CHECKS: Record<string, string> = {
-  gameDirectory: 'Game folder',
-  storeProtected: 'Folder permissions',
-  pathSafety: 'Target paths',
-  writable: 'Writable',
-  filesInUse: 'Files in use',
-  diskSpace: 'Disk space',
-  sourceFiles: 'Package contents',
-  graphicsCard: 'Graphics card',
-  otherTools: 'Other tools',
-};
 
 const FILE_STATUS: Record<string, { label: string; why: string }> = {
   intact: {
@@ -195,7 +185,7 @@ function checkRow(check: Check): HTMLLIElement {
   item.className = `check check-${check.outcome}`;
 
   const label = document.createElement('strong');
-  label.textContent = CHECKS[check.name] ?? check.name;
+  label.textContent = CHECK_LABELS[check.name as CheckName] ?? check.name;
   item.append(label);
 
   // Every check is listed, including the ones that passed. A user who can see

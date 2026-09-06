@@ -40,6 +40,49 @@ pub enum CheckName {
     OtherTools,
     DriverOverride,
     AntiCheat,
+    RemixMod,
+}
+
+impl CheckName {
+    /// Every variant, in the order the checks run and the user reads them.
+    ///
+    /// Exists for the same reason [`crate::error::Code::ALL`] does: the UI
+    /// holds a sentence per check, in a different language, and neither side
+    /// can tell on its own that the other has grown a case. Adding a variant
+    /// here without a label there used to show the user a raw `driverOverride`;
+    /// `spec/checks.json` now pins the two together.
+    pub const ALL: [CheckName; 12] = [
+        CheckName::GameDirectory,
+        CheckName::StoreProtected,
+        CheckName::PathSafety,
+        CheckName::Writable,
+        CheckName::FilesInUse,
+        CheckName::DiskSpace,
+        CheckName::SourceFiles,
+        CheckName::GraphicsCard,
+        CheckName::OtherTools,
+        CheckName::DriverOverride,
+        CheckName::AntiCheat,
+        CheckName::RemixMod,
+    ];
+
+    /// The wire name, which is what the UI keys its labels on.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CheckName::GameDirectory => "gameDirectory",
+            CheckName::StoreProtected => "storeProtected",
+            CheckName::PathSafety => "pathSafety",
+            CheckName::Writable => "writable",
+            CheckName::FilesInUse => "filesInUse",
+            CheckName::DiskSpace => "diskSpace",
+            CheckName::SourceFiles => "sourceFiles",
+            CheckName::GraphicsCard => "graphicsCard",
+            CheckName::OtherTools => "otherTools",
+            CheckName::DriverOverride => "driverOverride",
+            CheckName::AntiCheat => "antiCheat",
+            CheckName::RemixMod => "remixMod",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +174,7 @@ pub fn preflight(request: &Request<'_>) -> Preflight {
         check_other_tools(request),
         check_driver_override(request),
         check_anti_cheat(request),
+        check_remix(request),
     ];
 
     let ok = !checks
@@ -139,11 +183,127 @@ pub fn preflight(request: &Request<'_>) -> Preflight {
     Preflight { checks, ok }
 }
 
+/// Whether this game has an RTX Remix mod, which every route here would break.
+///
+/// A Remix mod replaces the game's `d3d9.dll` with a bridge and puts a
+/// 150-230 MB path-tracing runtime in a `.trex` folder. The frame is traced by
+/// that runtime, DLSS upscales it, and only then does a neural pass run - as a
+/// stage *inside* the runtime, not as an add-on beside the game.
+///
+/// So two things go wrong, and DLSS5-Autopilot enforces the same hard rule for
+/// the same two reasons:
+///
+/// 1. **ReShade crashes a Remix game before it draws a frame.** Not degrades:
+///    crashes.
+/// 2. On DirectX 9 an install here would **write over the Remix runtime
+///    itself**, which is the mod.
+///
+/// This fails rather than warns because the outcome is certain rather than
+/// likely. Every other route in this application produces *something*; into a
+/// Remix game they produce a game that does not start.
+///
+/// There is no acknowledgement flag, and that is deliberate: unlike anti-cheat
+/// there is no case where proceeding is what the user wants. The route that
+/// works here is one this application does not have.
+fn check_remix(request: &Request<'_>) -> Check {
+    // The runtime sits beside the executable, which is the game root for GTA IV
+    // and `bin\` for Portal RTX. So: both roots, and one level below the game
+    // root, which is the same reach `anticheat` has and for the same reason -
+    // the thing being looked for keeps itself in a folder of its own.
+    let Some(evidence) = find_remix(&install_dir_of(request), request.game_dir) else {
+        return pass(CheckName::RemixMod, "no RTX Remix mod here");
+    };
+
+    Check {
+        name: CheckName::RemixMod,
+        outcome: CheckOutcome::Fail,
+        detail: format!(
+            "This game has an RTX Remix mod - found `{evidence}`. Every route this application \
+             has installs an injector, which crashes a Remix game before it draws a frame; on \
+             DirectX 9 it would also write over the Remix runtime itself.\n\nOn a Remix game \
+             the neural pass belongs inside the Remix runtime rather than beside the \
+             executable, which is a route this application does not have yet. Remove the Remix \
+             mod first, or leave this game alone."
+        ),
+        code: Some(Code::RemixRuntimePresent.as_str().to_owned()),
+    }
+}
+
+/// Looks for an RTX Remix runtime, returning the entry that proves it.
+///
+/// Name-only, so it costs one `read_dir` per directory and opens nothing. Both
+/// roots plus one level under each, bounded the same way `anticheat` bounds its
+/// walk.
+fn find_remix(install_dir: &Path, game_dir: &Path) -> Option<String> {
+    let mut roots: Vec<&Path> = vec![install_dir, game_dir];
+    roots.dedup();
+
+    for root in roots {
+        // `continue`, not `?`: an unreadable first root must not cancel the
+        // second one.
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten().take(SCAN_LIMIT) {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            if footprints::names_a_tool(&name, is_dir) == Some(footprints::Tool::RtxRemix) {
+                return Some(name);
+            }
+
+            // One level down. `.trex` itself is skipped as a parent: it is
+            // already the answer above, and descending into a 200 MB runtime
+            // to look for itself is wasted work.
+            if !is_dir || name.starts_with('.') {
+                continue;
+            }
+            let Ok(inner) = std::fs::read_dir(entry.path()) else {
+                continue;
+            };
+            for child in inner.flatten().take(SCAN_LIMIT) {
+                let Some(child_name) = child.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let child_is_dir = child.file_type().is_ok_and(|kind| kind.is_dir());
+                if footprints::names_a_tool(&child_name, child_is_dir)
+                    == Some(footprints::Tool::RtxRemix)
+                {
+                    return Some(format!("{name}/{child_name}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// How many entries of one directory are worth reading before concluding that
+/// whatever is being looked for is not in it. Matches `anticheat`.
+const SCAN_LIMIT: usize = 200;
+
+/// The directory this plan installs into, derived from its own steps.
+///
+/// Falls back to the game root for a plan that writes there directly.
+fn install_dir_of(request: &Request<'_>) -> PathBuf {
+    request
+        .plan
+        .steps
+        .iter()
+        .filter(|step| step.action != StepAction::Skip)
+        .find_map(|step| {
+            let rel = step.rel.replace('\\', "/");
+            rel.rsplit_once('/')
+                .map(|(dir, _)| request.game_dir.join(dir))
+        })
+        .unwrap_or_else(|| request.game_dir.to_path_buf())
+}
+
 /// Whether anti-cheat is installed with this game.
 ///
-/// The only check here that fails rather than warns on something outside our
-/// control, and the reason is that its worst outcome is the only irreversible
-/// one in the application. A replaced file has a backup; a created directory
+/// One of two checks here that fail rather than warn on something outside our
+/// control - the other is the Remix rule above - and the reason is that its
+/// worst outcome is the only irreversible one in the application. A replaced file has a backup; a created directory
 /// is removed; a registry value is taken back. A banned account is not
 /// recoverable by any amount of care in this code.
 ///
@@ -867,6 +1027,70 @@ mod tests {
     }
 
     #[test]
+    fn a_remix_mod_beside_the_executable_blocks_every_route() {
+        let fixture = fixture(b"x");
+        fs::create_dir_all(fixture.game.join("bin/x64/.trex")).expect("trex");
+
+        let report = run(&fixture);
+
+        assert_eq!(outcome_of(&report, CheckName::RemixMod), CheckOutcome::Fail);
+        assert!(!report.ok, "a Remix game must not be installable");
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == CheckName::RemixMod)
+            .expect("remix check");
+        assert_eq!(check.code.as_deref(), Some("remixRuntimePresent"));
+        assert!(
+            check.detail.contains(".trex"),
+            "the user is told what was found: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn a_remix_runtime_one_level_down_is_still_found() {
+        // Portal RTX keeps its runtime under `bin\`, which is neither the game
+        // root nor the folder this plan installs into. An earlier version of
+        // this check looked only at those two and would have passed it.
+        let fixture = fixture(b"x");
+        fs::create_dir_all(fixture.game.join("bin/.trex")).expect("trex");
+
+        assert_eq!(
+            outcome_of(&run(&fixture), CheckName::RemixMod),
+            CheckOutcome::Fail
+        );
+    }
+
+    #[test]
+    fn the_remix_check_is_not_fooled_by_another_tool() {
+        // The directory table holds five names and only one of them is Remix.
+        // Matching on "is a tool present" rather than "is Remix present" would
+        // refuse an install over a ReShade folder.
+        let fixture = fixture(b"x");
+        fs::create_dir_all(fixture.game.join("reshade-shaders")).expect("shaders");
+
+        assert_eq!(
+            outcome_of(&run(&fixture), CheckName::RemixMod),
+            CheckOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn a_remix_bridge_file_counts_as_much_as_the_runtime_folder() {
+        // A mod mid-install, or one whose runtime sits elsewhere, still has the
+        // bridge beside the executable - and the bridge is the part that
+        // replaces d3d9.dll.
+        let fixture = fixture(b"x");
+        fs::write(fixture.game.join("bin/x64/nvremixbridge.exe"), b"x").expect("bridge");
+
+        assert_eq!(
+            outcome_of(&run(&fixture), CheckName::RemixMod),
+            CheckOutcome::Fail
+        );
+    }
+
+    #[test]
     fn the_features_written_come_from_the_steps() {
         // Derived rather than declared, so it cannot drift from what the
         // install actually does.
@@ -944,7 +1168,7 @@ mod tests {
         assert!(report.ok, "{:?}", report.blockers());
         // Every check is reported, not just the failures - the user sees the
         // whole picture on one screen.
-        assert_eq!(report.checks.len(), 11);
+        assert_eq!(report.checks.len(), 12);
     }
 
     #[test]
@@ -959,7 +1183,7 @@ mod tests {
         };
         let report = run(&broken);
         assert!(!report.ok);
-        assert_eq!(report.checks.len(), 11);
+        assert_eq!(report.checks.len(), 12);
         assert_eq!(
             outcome_of(&report, CheckName::GameDirectory),
             CheckOutcome::Fail

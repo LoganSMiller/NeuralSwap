@@ -321,6 +321,27 @@ const BY_DIRECTORY: [(&str, Tool); 5] = [
     (".trex", Tool::RtxRemix),
 ];
 
+/// What a single directory entry names, judged by its name alone.
+///
+/// The cheap half of [`survey`], and the same tables, so the two can never
+/// disagree about what a name means. It exists because a caller that only wants
+/// to know whether one tool is somewhere in a tree cannot afford a full survey
+/// per directory - that opens and reads every proxy DLL it finds, which is the
+/// right price for the folder being installed into and much too high for a walk
+/// across a game's subdirectories.
+///
+/// Says nothing about whether the tool still works. `survey` answers that.
+pub fn names_a_tool(entry_name: &str, is_dir: bool) -> Option<Tool> {
+    let lower = entry_name.to_lowercase();
+    if is_dir {
+        return BY_DIRECTORY
+            .iter()
+            .find(|(name, _)| *name == lower)
+            .map(|(_, tool)| *tool);
+    }
+    identify(&lower)
+}
+
 fn identify(lower: &str) -> Option<Tool> {
     if let Some((_, tool)) = BY_NAME.iter().find(|(name, _)| *name == lower) {
         return Some(*tool);

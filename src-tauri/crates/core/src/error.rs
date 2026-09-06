@@ -53,6 +53,8 @@ pub enum Code {
     /// undo that. Blocked by default, and past only by explicit
     /// acknowledgement.
     AntiCheatPresent,
+    /// This game has an RTX Remix mod, and every route here would break it.
+    RemixRuntimePresent,
 }
 
 impl Code {
@@ -63,7 +65,7 @@ impl Code {
     /// time with no counterpart in `ErrorCode`, which meant the UI could
     /// receive a code it had no translation for and show a user the raw
     /// string. `spec/errors.json` now pins the two together.
-    pub const ALL: [Code; 28] = [
+    pub const ALL: [Code; 29] = [
         Code::UnsafePath,
         Code::ReservedName,
         Code::SymlinkRefused,
@@ -92,6 +94,7 @@ impl Code {
         Code::VerifyFailed,
         Code::PlanStale,
         Code::AntiCheatPresent,
+        Code::RemixRuntimePresent,
     ];
 
     /// The wire form. Must match the TypeScript `ErrorCode` union exactly.
@@ -125,6 +128,7 @@ impl Code {
             Code::VerifyFailed => "verifyFailed",
             Code::PlanStale => "planStale",
             Code::AntiCheatPresent => "antiCheatPresent",
+            Code::RemixRuntimePresent => "remixRuntimePresent",
         }
     }
 }
