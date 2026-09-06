@@ -847,6 +847,71 @@ mod tests {
     }
 
     #[test]
+    fn an_optiscaler_already_loading_is_not_reinstalled_over() {
+        // The case on the development machine: Cyberpunk has OptiScaler in its
+        // dxgi.dll slot, configured, with an OptiScaler.ini someone tuned.
+        // Writing our copy over that is the sort of helpfulness that loses
+        // somebody an evening - so the dependency is shown as met, and the
+        // step is not work to do.
+        let catalog = default_catalog();
+        let recipe = build(
+            &catalog,
+            &[Feature::NeuralRendering],
+            &loading(Tool::OptiScaler),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: Some(crate::scan::api::Direct3D::Twelve),
+            },
+        );
+
+        let step = recipe
+            .steps
+            .iter()
+            .find(|step| step.component == "optiscaler")
+            .expect("the route's own component is still listed");
+        assert!(step.already_present, "{recipe:#?}");
+        assert!(
+            !recipe
+                .to_install()
+                .iter()
+                .any(|step| step.component == "optiscaler"),
+            "it must not be written over: {:?}",
+            recipe.to_install()
+        );
+        // And the runtime it carries is still installed, since that is the
+        // part the folder does not have.
+        assert!(recipe
+            .to_install()
+            .iter()
+            .any(|step| step.component == "nvngx-dlssnr"));
+    }
+
+    #[test]
+    fn the_optiscaler_route_does_not_clash_with_the_optiscaler_it_found() {
+        // A route reusing what holds the proxy slot has no conflict over it.
+        // This is the contrast with the native swap, which on the same folder
+        // wants ReShade in that slot and is correctly refused.
+        let catalog = default_catalog();
+        let recipe = build(
+            &catalog,
+            &[Feature::NeuralRendering],
+            &loading(Tool::OptiScaler),
+            &Situation {
+                integration: Integration::None,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::RayReconstruction],
+                card: Some(Generation::Blackwell),
+                direct3d: Some(crate::scan::api::Direct3D::Twelve),
+            },
+        );
+        assert!(recipe.clashes.is_empty(), "{:?}", recipe.clashes);
+        assert!(recipe.is_runnable());
+    }
+
+    #[test]
     fn the_optiscaler_route_installs_optiscaler_and_no_reshade() {
         // The point of the route, and the thing to check actually resolves:
         // `consumer_for` names a catalogue id, and a name with no component

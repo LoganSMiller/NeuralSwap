@@ -76,71 +76,74 @@ fn main() {
         let survey = neuralswap_core::scan::footprints::survey(exe.parent().unwrap_or(&game.dir));
         let game_feeds = Feature::fed_by_game(&scan.runtime_files);
 
-        // The best route the assessment offers is the one a user would be
-        // shown first.
-        let Some(&route) = found.routes.first() else {
+        // Every route the assessment offers, not only the first. Which of
+        // them is *runnable* is the question a user actually has, and on a
+        // folder that already holds an injector the answer differs between
+        // them - so showing one route hides the comparison that matters.
+        if found.routes.is_empty() {
             continue;
-        };
-        let built = recipe::build(
-            &catalog,
-            &Feature::ALL,
-            &survey,
-            &Situation {
-                integration: found.integration,
-                route,
-                game_feeds: &game_feeds,
-                card,
-                direct3d: candidate.api.as_ref().and_then(|verdict| verdict.direct3d),
-            },
-        );
+        }
+        for &route in &found.routes {
+            let built = recipe::build(
+                &catalog,
+                &Feature::ALL,
+                &survey,
+                &Situation {
+                    integration: found.integration,
+                    route,
+                    game_feeds: &game_feeds,
+                    card,
+                    direct3d: candidate.api.as_ref().and_then(|verdict| verdict.direct3d),
+                },
+            );
 
-        println!("\n{} - {:?} via {:?}", game.name, found.integration, route);
-        match &survey.proxy {
-            Some(slot) => println!("  proxy slot: {} owned by {:?}", slot.file, slot.owner),
-            None => println!("  proxy slot: free"),
-        }
-        for tool in survey.tools_present() {
-            if survey.is_leftovers(tool) {
-                println!("  leftovers:  {tool:?} is present but not loading");
+            println!("\n{} - {:?} via {:?}", game.name, found.integration, route);
+            match &survey.proxy {
+                Some(slot) => println!("  proxy slot: {} owned by {:?}", slot.file, slot.owner),
+                None => println!("  proxy slot: free"),
             }
-        }
-        if built.steps.is_empty() {
-            println!("  nothing to install");
-        }
-        for step in &built.steps {
-            let verb = if step.already_present {
-                "have   "
-            } else {
-                "install"
-            };
-            println!(
-                "  {verb} {:<22} {:?} - {}",
-                step.component, step.role, step.because
-            );
-        }
-        for item in &built.delivers {
-            println!("  gives   {:<22} {:?}", item.feature.label(), item.quality);
-        }
-        for item in &built.refuses {
-            println!("  refuses {:<22} {}", item.feature.label(), item.reason);
-        }
-        for clash in &built.clashes {
-            println!(
-                "  CLASH   {:?} vs {} - {}",
-                clash.tool, clash.with, clash.reason
-            );
-        }
-        for item in placement::plan(
-            &catalog,
-            &built,
-            &install_dir,
-            &placement::Target {
-                bitness: candidate.bitness,
-                api: candidate.api.as_ref().map(|verdict| verdict.api),
-                imports: &imports,
-            },
-        ) {
-            match &item.delivery {
+            for tool in survey.tools_present() {
+                if survey.is_leftovers(tool) {
+                    println!("  leftovers:  {tool:?} is present but not loading");
+                }
+            }
+            if built.steps.is_empty() {
+                println!("  nothing to install");
+            }
+            for step in &built.steps {
+                let verb = if step.already_present {
+                    "have   "
+                } else {
+                    "install"
+                };
+                println!(
+                    "  {verb} {:<22} {:?} - {}",
+                    step.component, step.role, step.because
+                );
+            }
+            for item in &built.delivers {
+                println!("  gives   {:<22} {:?}", item.feature.label(), item.quality);
+            }
+            for item in &built.refuses {
+                println!("  refuses {:<22} {}", item.feature.label(), item.reason);
+            }
+            for clash in &built.clashes {
+                println!(
+                    "  CLASH   {:?} vs {} - {}",
+                    clash.tool, clash.with, clash.reason
+                );
+            }
+            for item in placement::plan(
+                &catalog,
+                &built,
+                &install_dir,
+                &placement::Target {
+                    bitness: candidate.bitness,
+                    api: candidate.api.as_ref().map(|verdict| verdict.api),
+                    imports: &imports,
+                },
+            ) {
+                match &item.delivery {
                 placement::Delivery::Proxy { dir, as_name, from } => {
                     println!(
                         "  place   {:<22} {}/{as_name}  (renamed from {from})",
@@ -166,7 +169,8 @@ fn main() {
                     files.join(", ")
                 ),
             }
+            }
+            println!("  runnable: {}", built.is_runnable());
         }
-        println!("  runnable: {}", built.is_runnable());
     }
 }
