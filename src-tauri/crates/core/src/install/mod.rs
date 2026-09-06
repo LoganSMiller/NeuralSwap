@@ -29,6 +29,7 @@
 
 pub mod apply;
 pub mod discover;
+pub mod ini;
 pub mod journal;
 pub mod layer;
 pub mod manifest;
