@@ -559,3 +559,240 @@ RHI's `dlssnr-310.8.SF` and `-SF-v2` are the patched neural rendering runtimes;
 the AIO installer's file index names the same thing "RenoDX SF patched",
 covering RTX 20/30/40/50. Worth recording only so the naming is not a mystery
 when it turns up in a folder — NeuralSwap neither ships nor routes them.
+
+---
+
+## 11. What the runtime binary is made of
+
+Sourced from [neural-upstream](https://github.com/matiasLombo/neural-upstream)'s
+`FINDINGS.md`, which rebuilt `nvngx_dlssnr.dll` for Ada and documents what it
+had to take apart, and cross-checked against
+[DLSS5-Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot)'s `gpu.py`.
+
+| section | contents | changed by community builds |
+| --- | --- | --- |
+| `.text` | CPU code | a handful of bytes |
+| `.data` | 15 fatbins, kernels + PTX | ~90% |
+| `.rsrc` | **147 MB of weights** | **never** |
+
+**Four independent community builds had byte-identical weights.** Nobody
+quantises or retrains anything — they recompile kernels. The fatbinary carries
+PTX as well as cubins, which is what makes retargeting possible at all: the PTX
+payloads are zstd-compressed, and 35 MB of readable assembly comes out.
+
+That has a licensing consequence worth stating. A community build differs from
+NVIDIA's in *compiled kernels*, not in the model. And it has a verification
+consequence: a digest over `.rsrc` alone would establish that the weights are
+NVIDIA's unmodified, independent of who compiled the kernels around them.
+
+**Community builds are not authoritative.** Four existed, all different, none
+demonstrably NVIDIA's own.
+
+### Architecture is read from the file, never inferred from its name
+
+`0xBA55ED50` marks a fatbinary. The entry header is 64 bytes with the
+architecture at offset 28, payload size at 8, compressed size at 16. See
+`platform::fatbin`.
+
+The trap, measured on this machine: **a fatbinary can hold several
+architectures.** NVIDIA's own build has one each, so a reader that stops at the
+first entry looks correct against it and is wrong against every
+multi-architecture community build.
+
+| file | records |
+| --- | --- |
+| Cyberpunk 2077's `nvngx_dlssnr.dll` | `{120: 30}` — Blackwell only, NVIDIA's |
+| Ready or Not's `nvngx_dlssnr.dll` | `{75: 15, 86: 15, 89: 15, 120: 23}` |
+
+Both files are 165,840,496 bytes — the same size, because only the kernels
+differ.
+
+### Per-architecture builds, and their cost
+
+| card | build | reported cost |
+| --- | --- | --- |
+| RTX 50 | `310.8.0`, NVIDIA's own, FP8 | full speed |
+| RTX 40 | `310.8.0-RTX40`, community, sm_89 | moderate |
+| RTX 20 / 30 | `310.8.SF` / `SF-v2`, community, FP16 | heavy — about half the frame rate at 100% model resolution |
+| GTX, RTX 16 | — | does not run |
+
+**The two references disagree here, and it is not resolved.** Autopilot reports
+the FP16 builds as heavy; neural-upstream measured a multi-architecture FP16
+build at *the same speed* as native FP8 on Ada, and says outright that "the
+FP8-versus-FP16 premise did not survive contact with data". Ada has FP8 in
+hardware and Turing and Ampere do not, so both can be true of different cards —
+but neither has been measured on a 20- or 30-series part. Recorded as an open
+question rather than settled.
+
+`sm_75` covers both the RTX 20 series and the GTX 16 series, and only one of
+them has the tensor cores these kernels need. So the architecture check is
+necessary and not sufficient; `Generation::TuringNoRt` carries the other half.
+
+## 12. Where the neural pass sits, and what it expects
+
+**Neural rendering runs at output resolution, after the upscaler.** That is the
+shipped arrangement. neural-upstream moves it upstream — hooking
+`NVSDK_NGX_D3D12_EvaluateFeature`, creating a DLSSNR feature at the game's
+*render* resolution, and handing the result to the game's own DLSS as its colour
+input. The network is same-resolution only: it enhances, it does not upscale, so
+running it on the smaller image costs proportionally less.
+
+### The colour contract is not the one games hand DLSS
+
+The network expects a **bounded, display-referred** image. A game hands DLSS a
+**scene-linear HDR** buffer. Bridging that is not a detail:
+
+- normalise and roll off through a shoulder curve before the network sees it;
+- restore afterwards by reading the network's contribution as a **per-pixel
+  luminance gain** and applying it to the original, which keeps the full HDR
+  range and leaves hue and saturation as the game rendered them;
+- take reference white from the game's own exposure buffer, on a dedicated copy
+  queue, so it tracks day and night rather than a value tuned by hand.
+
+This is not in any NVIDIA document read for this project.
+
+### Anything that runs less than every frame must anchor to the game
+
+Counting evaluate calls does not work. The number of evaluates per frame is not
+something an add-on can assume, losing or gaining one flips the parity, and a
+miscount silently puts the work on the wrong frame. **Anchor on the DLSS
+jitter**: it comes from the game, is identical within a frame, and changes on
+every new one.
+
+The same project found **43% of evaluates were being handed raw colour**,
+because the game issues more than one per frame and only the first claimed it.
+
+And a skipped frame must not repeat the previous image — "colour from one frame
+against motion from the next is what ghosting is made of". Store what the network
+*changed*, follow it along the motion vectors, and reject it where depth says the
+surface underneath changed. That last case is a disocclusion, and the effect
+waiting there belongs to whatever used to be in front.
+
+## 13. Neural rendering and frame generation fight over pacing
+
+A measured, causally-established finding, and a constraint this project's
+capability model did not have.
+
+The network costs **4.8 ms of an 8.9 ms rendered frame** — 54% of the budget. Run
+it on every other frame and the rendered interval alternates **8.9 / 13.9 ms**.
+DLSS-G places its generated frames inside that interval and **cannot pace through
+a 56% swing**, so the artefact grows with both the multiplier and the cadence.
+
+Ruled out with evidence rather than argued: their own `sm_89` kernels (a
+third-party multi-arch build shows the same), a failing evaluate (`erfail=0`),
+what the add-on draws (`EffectStrength=0` — identical work, no visible effect,
+artefact unchanged), the compositing shader, and Streamline's descriptor heap.
+
+**Running the network every frame is the only mode that works under frame
+generation.** Same total cost, spread evenly, paces cleanly at 4x.
+
+Two diagnostic notes worth keeping:
+
+- **`will skip the present` in `sl.log` is not a failure.** It fires whenever
+  frame generation is switched off, which is teardown. Reading it as an error
+  cost that project hours.
+- **NGX does not go through `nvcuda.dll`.** The driver runs these kernels on an
+  internal path, so `cuLaunchKernel` cannot be hooked and CUDA-level profilers
+  are unlikely to see them at all.
+
+## 14. Anti-cheat is the one irreversible consequence
+
+Every other risk in this space is recoverable. This one is not, and it is
+implemented in `scan::anticheat`.
+
+An add-on route injects a DLL and detours graphics entry points. Every
+kernel-level anti-cheat treats that as tampering, and the outcome is one of:
+the game refuses to start; the injector is silently blocked, so nothing happens
+and the user concludes the tool is broken; **or the account is banned.**
+
+Autopilot's own note names Arma 3 and Arma Reforger as the recurring report —
+both ship BattlEye, both do nothing when set up, neither is a bug in the tool.
+
+Detected by **file, not by a list of games**: the files an anti-cheat installs
+are the same whatever ships them, so this covers titles nobody has reported.
+Found immediately on the development machine — War Thunder ships BattlEye in a
+folder of that name.
+
+## 15. The wider route table
+
+Autopilot offers eight routes where this project models three. Recorded because
+the ones missing here are real capabilities, not variations.
+
+| route | mechanism | for |
+| --- | --- | --- |
+| native | `renodx-dlss5` hooks the DLSS calls the game already makes | 64-bit D3D12 with DLSS |
+| **neural-upstream** | runs the network at render resolution, before the game's DLSS | 64-bit D3D12 with DLSS |
+| optiscaler | replaces the upscaler and runs the model over its output; no ReShade | 64-bit D3D11/12 with DLSS, or FSR 2/3 / XeSS redirected into DLSS |
+| bridge | mirrors the DLSS contract onto a private D3D12 session | D3D11 and Vulkan with DLSS |
+| feeder | builds a DLAA contract from ReShade's depth buffer and shader motion vectors | games with **no** DLSS, including 32-bit (host64 helper) and D3D9 (via DXVK) |
+| standalone-dlssnr | own feed, shown through its own window | 64-bit D3D11/12, experimental |
+| renodx-dlss | hooks D3D9/11/12 in-process | 64-bit D3D9 |
+| **remix** | the neural pass runs inside an RTX Remix runtime, after its upscaler | any game with a `.trex` folder |
+
+**Two rules that override the table.** A Remix mod present means the remix route
+always — ReShade crashes a Remix game before it draws. And nothing goes into a
+game with anti-cheat.
+
+### Frame generation without Reflex
+
+This project's capability model treats frame generation as DLSS-G, which needs
+Reflex through Streamline and therefore cannot be fed. That is true of DLSS-G and
+**not** of frame generation in general: OptiScaler ships AMD's **FSR 3.1**
+frame-generation libraries, which work on RTX 20 through 50 in any D3D12 game on
+that route. One generated frame per rendered one.
+
+Separately, RTX40MFG-Unlock raises the multiplier of a DLSS Frame Generation the
+game *already has* to 3x/4x in memory — offered only on an RTX 40, and only when
+`nvngx_dlssg.dll` or `sl.dlss_g.dll` is already in the folder.
+
+## 16. Operational facts that decide whether an install works
+
+Small, specific, and each one the difference between a working setup and a
+confusing one.
+
+- **Set resolution and display mode before turning neural rendering on.** The
+  feature is built for one back-buffer size, and a rebuild mid-session is where
+  crashes live. Prefer borderless over exclusive fullscreen for the same reason.
+- **MSAA and SSAA off**, on every route.
+- **The motion-vector provider's technique must sit above `DLSS5_Feed` in
+  ReShade's technique list**, or the feed never receives vectors. ReShade stores
+  multi-values comma-separated and escapes a literal comma as `,,`; techniques
+  are written `Name@File.fx`.
+- **LumeniteFX reads zero motion on OpenGL.** VORT Motion — optical flow from the
+  colour buffer alone — is the provider to use there.
+- **Version pinning is real.** Feeder builds before 0.8 pair with add-on 4.55;
+  OpenGL is pinned to 4.60 because 4.70 stalls on GL.
+- **Two loaders must never share a proxy filename**, and the name has to be one
+  the executable actually imports — a Vulkan game may never load `dxgi.dll`.
+- **`"No .fx files found"` in ReShade's overlay is normal** on the add-on routes.
+  The add-on tab is what matters.
+
+## 17. Method, from a project that measured rather than reasoned
+
+neural-upstream's `FINDINGS.md` closes with lessons that are worth carrying
+because this project has hit every one of them.
+
+- **Validate the instrument before trusting it.** Their profiler had never
+  worked: `prof_report()` was defined and never called, *and* `g_prof.freq` was
+  declared and never assigned, so it returned on its first line regardless.
+  "Every cost figure quoted before this point came from nowhere."
+- **The instrument keeps becoming the experiment.** Twice: a ring dump that
+  wrote 1024 lines through a locking logger on the present thread *produced* the
+  artefact it was meant to catch.
+- **Use a control variable.** GPU clocks ramp during a run, so a stage whose cost
+  does not depend on the thing being measured reveals the machine's state.
+  Comparing run averages without it "produced a confident and wrong conclusion".
+- **Divergences from a single pass are noise.** The same reference kernel
+  returned `ILLEGAL_ADDRESS` four times and `OK` once across five runs.
+- **A crash is one bit of information.** Bisecting by swapping modules turned "it
+  crashes" into "module 5, the attention kernels" and then into a specific
+  missing `cvta`.
+- **Test both directions.** Declaring a parameter optimal after only lowering it
+  was wrong twice over.
+
+Four optimisation levers they measured, all null or negative — recorded so nobody
+here spends the time again: bypassing L1, halving register pressure to double
+occupancy, eliminating spill, and replacing `cp.async` with plain loads. The
+kernels are **39.2% integer arithmetic** and only **4.2% tensor**, so they are
+dominated by address arithmetic rather than by maths or memory traffic, which is
+why none of it helped.
