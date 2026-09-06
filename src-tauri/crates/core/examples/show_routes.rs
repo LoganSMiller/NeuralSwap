@@ -7,6 +7,7 @@
 //! that works is to point it at games that really do integrate Streamline and
 //! games that really do not.
 
+use neuralswap_core::scan::folder::Provenance;
 use neuralswap_core::scan::integration::assess;
 use neuralswap_core::scan::{scan_folder, RuntimeKind};
 use neuralswap_core::{
@@ -55,8 +56,12 @@ fn main() {
         // the assessment, which stays a pure function of its arguments.
         let card = neuralswap_core::platform::gpu::best_nvidia().map(|found| found.generation);
 
+        // Provenance-filtered, like `game_feeds` above: a runtime file beside
+        // the executable is not evidence the game calls it, and `assess`
+        // documents that it needs the stronger claim.
         let has_native_dlss = scan.runtime_files.iter().any(|file| {
             file.kind == RuntimeKind::Dlss
+                && file.provenance == Provenance::ConsistentWithSiblings
                 && file
                     .rel
                     .replace('\\', "/")
@@ -97,23 +102,35 @@ fn main() {
         );
         println!("  because    : {}", found.reason);
 
-        let situation = neuralswap_core::scan::capability::Situation {
-            integration: found.integration,
-            route: *found
-                .routes
-                .first()
-                .unwrap_or(&neuralswap_core::scan::Route::Feeder),
-            game_feeds: &game_feeds,
-            card,
-            direct3d: candidate.api.as_ref().and_then(|verdict| verdict.direct3d),
+        // Every offered route, not just the first. What a route can deliver is
+        // the reason to choose between them, and one of them reaching a feature
+        // the others cannot is exactly what is worth seeing.
+        let routes = if found.routes.is_empty() {
+            vec![neuralswap_core::scan::Route::Feeder]
+        } else {
+            found.routes.clone()
         };
-        for entry in neuralswap_core::scan::capability::all_outlooks(&situation) {
-            println!(
-                "    {:<18} {:?}  {}",
-                entry.feature.label(),
-                entry.quality,
-                entry.note
-            );
+        for route in routes {
+            let situation = neuralswap_core::scan::capability::Situation {
+                integration: found.integration,
+                route,
+                game_feeds: &game_feeds,
+                card,
+                direct3d: candidate.api.as_ref().and_then(|verdict| verdict.direct3d),
+            };
+            println!("  via {:?}:", route);
+            for entry in neuralswap_core::scan::capability::all_outlooks(&situation) {
+                println!(
+                    "    {:<18} {:?}{}  {}",
+                    entry.feature.label(),
+                    entry.quality,
+                    entry
+                        .substitute
+                        .map(|other| format!(" ({})", other.label()))
+                        .unwrap_or_default(),
+                    entry.note
+                );
+            }
         }
 
         // The imports the decision actually turned on.

@@ -13,6 +13,7 @@ use neuralswap_core::install::{placement, recipe};
 use neuralswap_core::jobs::Cancel;
 use neuralswap_core::pe::PeCache;
 use neuralswap_core::scan::capability::{Feature, Situation};
+use neuralswap_core::scan::folder::{Provenance, RuntimeKind};
 use neuralswap_core::scan::integration::assess;
 use neuralswap_core::scan::scan_folder;
 use neuralswap_core::{library, platform};
@@ -49,7 +50,12 @@ fn main() {
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().to_lowercase())
             .collect();
-        let has_native_dlss = beside.iter().any(|name| name.starts_with("nvngx"));
+        // Provenance-filtered rather than "a file named nvngx is here", which
+        // `assess` documents as the wrong claim: those files get left behind
+        // and copied in by hand, so presence does not imply the game calls it.
+        let has_native_dlss = scan.runtime_files.iter().any(|file| {
+            file.kind == RuntimeKind::Dlss && file.provenance == Provenance::ConsistentWithSiblings
+        });
         // Where the runtime loads from: the executable's own directory.
         let install_dir = candidate
             .rel

@@ -216,9 +216,17 @@ pub fn ships_upscaler(beside: &[String]) -> Option<Upscaler> {
 /// directory. Needed because manual hooking leaves no trace in the import
 /// table; see the module documentation.
 ///
-/// `has_native_dlss` is separate evidence - runtime files found beside the
-/// executable - because a DX11 game can ship DLSS without linking Streamline,
-/// and that is exactly the case the bridge route exists for.
+/// `drives_dlss` is separate evidence - a DLSS runtime the game itself
+/// drives - because a DX11 game can ship DLSS without linking Streamline, and
+/// that is exactly the case the bridge route exists for.
+///
+/// **It must be provenance-filtered.** "A DLSS file is in the folder" is not
+/// the same claim, and this module's own header explains why: those files get
+/// left behind by old game versions and copied in by hand, so presence does
+/// not imply use. Passing raw file presence here offers routes that have
+/// nothing to work with - Escape the Backrooms has `nvngx_dlss.dll` beside its
+/// executable, nothing in the game calls it, and it was being offered a route
+/// whose entry requirement is an upscaler call to take over.
 /// `bitness` is 32 or 64, or `None` when the executable could not be read.
 /// Only [`Route::OptiScaler`] depends on it, and an unknown bitness withholds
 /// that route rather than guessing - offering a 64-bit-only component to a
@@ -227,7 +235,7 @@ pub fn ships_upscaler(beside: &[String]) -> Option<Upscaler> {
 pub fn assess(
     imports: &[String],
     beside: &[String],
-    has_native_dlss: bool,
+    drives_dlss: bool,
     bitness: Option<u8>,
     api: Option<Api>,
 ) -> Assessment {
@@ -259,11 +267,11 @@ pub fn assess(
             .any(|name| imported(name)),
     };
     // Every kind of evidence that this game has DLSS, not just the one the
-    // caller measured. `has_native_dlss` is runtime files found on disk, which
+    // caller measured. `drives_dlss` is the runtime the game itself calls, which
     // is the weakest of the four and the only one an earlier version of this
     // gate consulted - so a game that *imports* NGX, or links Streamline, was
     // told it had nothing for OptiScaler to take over while plainly having it.
-    let dlss_of_its_own = has_native_dlss
+    let dlss_of_its_own = drives_dlss
         || STREAMLINE
             .iter()
             .any(|name| imported(name) || shipped(name))
@@ -317,7 +325,7 @@ pub fn assess(
 
     // Has DLSS but no Streamline plumbing we can see. Mirroring its real DLSS
     // yields a genuine contract, which beats synthesising one.
-    if has_native_dlss && (dx11 || vulkan) {
+    if drives_dlss && (dx11 || vulkan) {
         return Assessment {
             integration: Integration::None,
             routes: with_optiscaler(vec![Route::Bridge], optiscaler)
@@ -329,7 +337,7 @@ pub fn assess(
                 .to_owned(),
         };
     }
-    if has_native_dlss {
+    if drives_dlss {
         return Assessment {
             integration: Integration::None,
             routes: with_optiscaler(vec![Route::NativeSwap], optiscaler)

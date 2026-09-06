@@ -168,7 +168,8 @@ fn route_suggestion(route: Route) -> &'static str {
         // missing input is missing because the game never produced it, and
         // the routes that invent inputs are still worth naming.
         Route::OptiScaler => {
-            "This route uses the game's own inputs rather than inventing any, so the feeder              route is what remains - at lower quality."
+            "This route uses the game's own inputs rather than inventing any, so the feeder \
+             route is what remains - at lower quality."
         }
     }
 }
@@ -210,6 +211,19 @@ pub fn build(
                 refuses.push(Refuses {
                     feature,
                     reason: found.note,
+                });
+                continue;
+            }
+            // Delivered, but by something other than the DLSS runtime for
+            // this feature - so it skips both the consumer question below and
+            // the runtime, and rides on the route's own component. Adding
+            // `nvngx_dlssg.dll` here would put a file in the folder that
+            // nothing loads, and bill the user for it in the plan.
+            Quality::Substituted => {
+                delivers.push(Delivers {
+                    feature,
+                    quality: found.quality,
+                    note: found.note,
                 });
                 continue;
             }

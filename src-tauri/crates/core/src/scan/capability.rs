@@ -462,6 +462,14 @@ pub enum Quality {
     /// The game's own DLSS is mirrored onto a private session, so the inputs
     /// are real rather than estimated.
     Mirrored,
+    /// Delivered properly, by a different implementation than NVIDIA's.
+    ///
+    /// Not a degraded version of the DLSS feature and not an estimate of it:
+    /// a second mechanism that produces the same user-visible result under
+    /// requirements the DLSS one cannot meet here. Ranked below the real thing
+    /// because it is not what the user asked for by name, and well above
+    /// `Estimated` because nothing about it is invented. See [`Substitute`].
+    Substituted,
     /// Some inputs are estimated. Works, and how well is game-dependent.
     Estimated,
     /// Cannot be delivered: an input would require the game to render
@@ -492,6 +500,81 @@ pub struct Outlook {
     /// install", and for neural rendering the answer is always "more than the
     /// runtime", because no game can ask for it directly.
     pub needs_consumer_addon: Option<String>,
+    /// The other mechanism that will deliver this, when it is not DLSS's own.
+    ///
+    /// Set only alongside [`Quality::Substituted`]. The UI needs it because
+    /// "frame generation: yes" and "frame generation: yes, by AMD's
+    /// implementation, at 2x" are different promises, and a user who was
+    /// expecting DLSS multi-frame generation should be told which one they are
+    /// getting before they install it rather than after.
+    pub substitute: Option<Substitute>,
+}
+
+/// A different implementation that delivers the same outcome as a DLSS feature.
+///
+/// This exists because [`Feature`] names a *result* - more frames, more
+/// resolution - and this application had quietly modelled each one as the
+/// single NVIDIA mechanism that produces it. For frame generation that is
+/// wrong in a way that costs users the feature entirely: DLSS frame generation
+/// needs the game to emit Reflex markers through Streamline, which cannot be
+/// added from outside, so a game without it was told frame generation was out
+/// of reach. It is out of reach *from DLSS*. AMD's FSR 3.1 frame generation
+/// asks for none of that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Substitute {
+    /// AMD FSR 3.1 frame generation, driven by OptiScaler.
+    ///
+    /// Requirements, all of them from OptiScaler's own handling of it:
+    ///
+    /// - **Direct3D 12 only.** Not 11, even though the route itself runs on 11.
+    /// - **One generated frame per rendered frame.** 2x and only 2x; the 3x and
+    ///   4x multipliers are NVIDIA multi-frame generation and are not this.
+    /// - **An upscaler must be running to feed it**, which on this route is
+    ///   true by construction - having one is the route's own entry
+    ///   requirement, and it is what the input is wired to.
+    /// - Works on RTX 20 through 50, so it is available on cards two
+    ///   generations below what DLSS frame generation needs.
+    ///
+    /// The libraries ship inside OptiScaler's own package, so nothing extra is
+    /// fetched. A build that predates them cannot do this, which is a fact
+    /// about the downloaded component rather than about the game, so it is
+    /// checked where the component is unpacked rather than here.
+    FsrFrameGeneration,
+}
+
+impl Substitute {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Substitute::FsrFrameGeneration => "AMD FSR 3.1 frame generation",
+        }
+    }
+
+    /// The oldest card that can run it.
+    ///
+    /// The reason this type has to exist at all: DLSS frame generation needs
+    /// Ada, and this needs Turing. Applying the feature's floor to a substitute
+    /// would refuse it on precisely the cards it was worth having on.
+    pub const fn minimum_generation(self) -> Generation {
+        match self {
+            Substitute::FsrFrameGeneration => Generation::Turing,
+        }
+    }
+
+    /// Whether a substitute can deliver `feature` in this situation.
+    ///
+    /// Only consulted when the DLSS mechanism cannot be reached, so it never
+    /// displaces the real thing - a game that drives DLSS frame generation
+    /// itself keeps it, multipliers and all.
+    fn available_for(feature: Feature, route: Route, direct3d: Option<Direct3D>) -> Option<Self> {
+        // `Some(Twelve)` rather than "not Eleven": an unknown Direct3D version
+        // is grounds for reporting on the inputs, but not for promising a
+        // feature that a D3D11 game would then not get.
+        let fsr_fg = feature == Feature::FrameGeneration
+            && route == Route::OptiScaler
+            && direct3d == Some(Direct3D::Twelve);
+        fsr_fg.then_some(Substitute::FsrFrameGeneration)
+    }
 }
 
 /// Everything an outlook is decided from, other than the feature itself.
@@ -549,6 +632,14 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
         )
     });
 
+    // A second mechanism for the same outcome, where one exists. Worked out
+    // before the hardware gate because it changes what that gate is allowed to
+    // refuse: DLSS frame generation needs Ada and FSR 3.1 frame generation
+    // needs Turing, so asking only about the DLSS floor would refuse the
+    // feature on the two generations of card where the substitute was the
+    // whole point.
+    let substitute = Substitute::available_for(feature, route, direct3d);
+
     // The graphics API gate, decided alongside the hardware one and for the
     // same reason: what a game feeds is beside the point if the plugin refuses
     // to load at all. `sl.dlss_g` and `sl.dlss_nr` list `d3d12, vk` in their
@@ -569,12 +660,15 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
             estimated: Vec::new(),
             out_of_reach: Vec::new(),
             note: format!(
-                "{} is implemented by {}, which runs only on Direct3D 12 and Vulkan - and this                  game is Direct3D 11. Bridging its DLSS onto a private Direct3D 12 session is                  the route that gets past that.",
+                "{} is implemented by {}, which runs only on Direct3D 12 and Vulkan - and \
+                 this game is Direct3D 11. Bridging its DLSS onto a private Direct3D 12 \
+                 session is the route that gets past that.",
                 feature.label(),
                 feature.streamline_plugin().0
             ),
             documented,
             needs_consumer_addon,
+            substitute: None,
         };
     }
 
@@ -585,24 +679,33 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
     // the filesystem. `None` means the card is unknown, which reports on the
     // inputs instead of refusing: an unidentified adapter is not evidence of
     // old hardware.
-    if let Some(card) = card {
-        if !card.at_least(feature.minimum_generation()) {
-            return Outlook {
-                feature,
-                quality: Quality::HardwareTooOld,
-                route,
-                estimated: Vec::new(),
-                out_of_reach: Vec::new(),
-                note: format!(
-                    "{} needs {} or newer, and this machine has {}.",
-                    feature.label(),
-                    feature.minimum_generation().label(),
-                    card.label()
-                ),
-                documented,
-                needs_consumer_addon,
-            };
-        }
+    //
+    // Asked per mechanism, not per feature. The card has to be too old for
+    // *everything* that could deliver the outcome before this is a refusal.
+    let dlss_runs = card.is_none_or(|card| card.at_least(feature.minimum_generation()));
+    let substitute_runs = substitute
+        .is_some_and(|other| card.is_none_or(|card| card.at_least(other.minimum_generation())));
+
+    // `if let` rather than an unwrap: both flags are true when the card is
+    // unknown, so this cannot be reached with `None` - but saying so in a
+    // panic message is a worse way to express it than not being able to.
+    if let Some(card) = card.filter(|_| !dlss_runs && !substitute_runs) {
+        return Outlook {
+            feature,
+            quality: Quality::HardwareTooOld,
+            route,
+            estimated: Vec::new(),
+            out_of_reach: Vec::new(),
+            note: format!(
+                "{} needs {} or newer, and this machine has {}.",
+                feature.label(),
+                feature.minimum_generation().label(),
+                card.label()
+            ),
+            documented,
+            needs_consumer_addon,
+            substitute: None,
+        };
     }
 
     if route == Route::NativeSwap {
@@ -637,6 +740,7 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
                 },
                 documented,
                 needs_consumer_addon,
+                substitute: None,
             };
         }
 
@@ -684,6 +788,7 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
             },
             documented,
             needs_consumer_addon,
+            substitute: None,
         };
     }
 
@@ -711,6 +816,33 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
         // frame generation is genuinely out of reach here, unlike everything
         // else this route touches.
         let needs_reflex = missing.contains(&Input::ReflexMarkers);
+
+        // Unless something else can deliver the same outcome, which for frame
+        // generation on Direct3D 12 it can. This is the case the whole
+        // substitute idea exists for: the user asked for more frames, DLSS
+        // cannot give them here, and something in the package can.
+        if let Some(other) = substitute.filter(|_| needs_reflex || !dlss_runs) {
+            return Outlook {
+                feature,
+                quality: Quality::Substituted,
+                route,
+                estimated: Vec::new(),
+                out_of_reach: Vec::new(),
+                note: format!(
+                    "{} is not reachable here - DLSS frame generation needs this game to emit \
+                     Reflex markers through Streamline, which cannot be added from outside. \
+                     {} can do it instead: one generated frame per rendered frame, fed by the \
+                     upscaler this route is already taking over. It is not DLSS frame \
+                     generation, and the 3x and 4x multipliers are not available this way.",
+                    feature.label(),
+                    other.label()
+                ),
+                documented,
+                // The route carries it, so there is nothing separate to add.
+                needs_consumer_addon: None,
+                substitute: Some(other),
+            };
+        }
 
         let (quality, note) = if fed_by_game {
             (
@@ -754,6 +886,7 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
             // OptiScaler is itself the thing that asks for the feature, so the
             // route already carries the consumer the game does not provide.
             needs_consumer_addon: None,
+            substitute: None,
         };
     }
 
@@ -773,6 +906,7 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
             ),
             documented,
             needs_consumer_addon,
+            substitute: None,
         };
     }
 
@@ -842,6 +976,7 @@ pub fn outlook(feature: Feature, situation: &Situation<'_>) -> Outlook {
         note,
         documented,
         needs_consumer_addon,
+        substitute: None,
     }
 }
 
@@ -963,6 +1098,106 @@ mod tests {
             },
         );
         assert_eq!(found.quality, Quality::Native);
+    }
+
+    fn frame_generation_on(route: Route, card: Generation, d3d: Option<Direct3D>) -> Outlook {
+        outlook(
+            Feature::FrameGeneration,
+            &Situation {
+                integration: Integration::None,
+                route,
+                game_feeds: &[Feature::SuperResolution],
+                card: Some(card),
+                direct3d: d3d,
+            },
+        )
+    }
+
+    #[test]
+    fn frame_generation_is_delivered_by_fsr_where_dlss_cannot_reach_it() {
+        // The gap this closes. The game does not emit Reflex markers and never
+        // will, so DLSS frame generation is genuinely impossible - and the
+        // user was told "frame generation: out of reach", which answered a
+        // question about a mechanism when they had asked about an outcome.
+        let found = frame_generation_on(
+            Route::OptiScaler,
+            Generation::Blackwell,
+            Some(Direct3D::Twelve),
+        );
+
+        assert_eq!(found.quality, Quality::Substituted);
+        assert_eq!(found.substitute, Some(Substitute::FsrFrameGeneration));
+        // And it says which one, and what the user does not get: someone
+        // expecting multi-frame generation must not be surprised after
+        // installing.
+        assert!(found.note.contains("FSR 3.1"), "{}", found.note);
+        assert!(found.note.contains("3x and 4x"), "{}", found.note);
+    }
+
+    #[test]
+    fn the_substitute_carries_its_own_hardware_floor() {
+        // The reason a substitute cannot be an afterthought bolted onto the
+        // end. DLSS frame generation needs Ada, so a per-feature hardware gate
+        // refuses on Turing and Ampere - the two generations where having a
+        // second mechanism matters most.
+        for card in [Generation::Turing, Generation::Ampere] {
+            let found = frame_generation_on(Route::OptiScaler, card, Some(Direct3D::Twelve));
+            assert_eq!(found.quality, Quality::Substituted, "{card:?}");
+        }
+    }
+
+    #[test]
+    fn a_card_too_old_for_either_mechanism_is_still_refused() {
+        // The gate has to keep working. Turing is the floor for the substitute
+        // as well, so anything below it has nothing left to offer.
+        let found = frame_generation_on(
+            Route::OptiScaler,
+            Generation::TuringNoRt,
+            Some(Direct3D::Twelve),
+        );
+        assert_eq!(found.quality, Quality::HardwareTooOld);
+        assert_eq!(found.substitute, None);
+    }
+
+    #[test]
+    fn the_substitute_is_direct3d_12_only() {
+        // The route runs on Direct3D 11 and this does not, so the two cannot
+        // share an answer. An unknown version is refused the promise for the
+        // same reason: it might be 11.
+        for d3d in [Some(Direct3D::Eleven), None] {
+            let found = frame_generation_on(Route::OptiScaler, Generation::Blackwell, d3d);
+            assert_ne!(found.quality, Quality::Substituted, "{d3d:?}");
+            assert_eq!(found.substitute, None, "{d3d:?}");
+        }
+    }
+
+    #[test]
+    fn no_other_route_gets_the_substitute() {
+        // It is OptiScaler that carries the libraries and wires the upscaler
+        // to them. Offering it on the feeder would promise something nothing
+        // in that install can do.
+        for route in [Route::NativeSwap, Route::Bridge, Route::Feeder] {
+            let found = frame_generation_on(route, Generation::Blackwell, Some(Direct3D::Twelve));
+            assert_eq!(found.substitute, None, "{route:?}");
+        }
+    }
+
+    #[test]
+    fn a_game_with_real_frame_generation_keeps_it() {
+        // The substitute must never displace the real thing: DLSS frame
+        // generation in a game that drives it has multipliers this does not.
+        let found = outlook(
+            Feature::FrameGeneration,
+            &Situation {
+                integration: Integration::Streamline,
+                route: Route::OptiScaler,
+                game_feeds: &[Feature::FrameGeneration],
+                card: Some(Generation::Blackwell),
+                direct3d: Some(Direct3D::Twelve),
+            },
+        );
+        assert_eq!(found.quality, Quality::Native);
+        assert_eq!(found.substitute, None);
     }
 
     #[test]
