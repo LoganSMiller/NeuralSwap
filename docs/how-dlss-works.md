@@ -445,7 +445,9 @@ OptiScaler (GPL-3.0, ~10k stars) exports the full surface of `d3d12`, `dxgi`,
 `dbghelp`, `version`, `winhttp`, `wininet` and `winmm`. It is renamed to
 whichever of those the target game loads, forwards the genuine calls onward, and
 intercepts the upscaler API in between — so it can present DLSS inputs to a game
-that only ever asked for FSR or XeSS, or the reverse.
+that only ever asked for FSR or XeSS, or the reverse. §18 covers the route built
+on it: the files, the requirements, and what it can deliver that no other route
+here can.
 
 The consequence for install planning is that OptiScaler's filename **is** its
 configuration: which name it takes decides whether it loads at all, and it must
@@ -715,8 +717,9 @@ folder of that name.
 
 ## 15. The wider route table
 
-Autopilot offers eight routes where this project models three. Recorded because
-the ones missing here are real capabilities, not variations.
+Autopilot offers eight routes. This project models four - `optiscaler` has since
+been built, and §18 documents it. Recorded because the ones still missing are
+real capabilities, not variations.
 
 | route | mechanism | for |
 | --- | --- | --- |
@@ -735,11 +738,15 @@ game with anti-cheat.
 
 ### Frame generation without Reflex
 
-This project's capability model treats frame generation as DLSS-G, which needs
-Reflex through Streamline and therefore cannot be fed. That is true of DLSS-G and
-**not** of frame generation in general: OptiScaler ships AMD's **FSR 3.1**
-frame-generation libraries, which work on RTX 20 through 50 in any D3D12 game on
-that route. One generated frame per rendered one.
+This project's capability model *used to* treat frame generation as DLSS-G,
+which needs Reflex through Streamline and therefore cannot be fed. That is true
+of DLSS-G and **not** of frame generation in general: OptiScaler ships AMD's
+**FSR 3.1** frame-generation libraries, which work on RTX 20 through 50 in any
+D3D12 game on that route. One generated frame per rendered one.
+
+`Feature` names an *outcome*, so modelling each outcome as the one NVIDIA
+mechanism that produces it was the error, and it cost users the feature
+entirely. `Substitute` is the fix, and §18 has the details.
 
 Separately, RTX40MFG-Unlock raises the multiplier of a DLSS Frame Generation the
 game *already has* to 3x/4x in memory — offered only on an RTX 40, and only when
@@ -796,3 +803,109 @@ occupancy, eliminating spill, and replacing `cp.async` with plain loads. The
 kernels are **39.2% integer arithmetic** and only **4.2% tensor**, so they are
 dominated by address arithmetic rather than by maths or memory traffic, which is
 why none of it helped.
+
+## 18. The OptiScaler route, in detail
+
+Sourced from [DLSS5-Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot)'s
+`optiscaler.py` and `dlss.py`, which drive
+[Dagherbou/OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR).
+Implemented here as `Route::OptiScaler`.
+
+This is the route that serves the "no ReShade" half of this project's goal, and
+the difference from the feeder is *where the inputs come from* rather than how
+much overhead there is:
+
+```text
+feeder      game -> ReShade -> depth copy + motion-vector shader ->
+            synthetic contract -> DLSS
+optiscaler  game -> OptiScaler (proxy DLL) -> the game's own DLSS inputs -> DLSS
+```
+
+Two consequences follow, and both are why the route is worth having:
+
+- **Real upscaling.** The feeder is always DLAA at native resolution, because
+  it cannot make a game jitter its sampling. A game with an upscaler is already
+  jittering, so a lower render resolution genuinely costs less to draw.
+- **The model never sees the HUD.** The pass runs after the upscaler and
+  *before* the interface is drawn. The feeder processes the HUD with the scene,
+  a limitation upstream acknowledges.
+
+Read published FPS comparisons carefully: at 75% model resolution OptiScaler is
+drawing fewer pixels while the feeder is at native, so part of any gap is
+upscaling rather than efficiency.
+
+### What it requires
+
+- 64-bit, and **Direct3D 11 or 12** — not Vulkan, not D3D9.
+- **An upscaler call to take over.** The game must already use DLSS, FSR 2/3 or
+  XeSS. Without one there is nothing to read, and this is the hard gate.
+- A driver shipping `nvngx_dlssnr.dll` (≥ 616.56).
+- On D3D11 the upscaler becomes FSR on OptiScaler's D3D12 bridge, because the
+  model refuses to run on D3D11 — `[Upscalers] Dx11Upscaler=fsr22_12`, which is
+  built in, so nothing extra is fetched.
+
+An FSR or XeSS game feeds the same resource class DLSS super resolution does —
+that is *why* the calls can be redirected — so it reads as feeding super
+resolution and nothing beyond it. It says nothing about the G-buffer: a game
+that upscales has no reason to tag albedo. `Feature::fed_by_upscaler` is that
+statement in one place.
+
+### The files, and where they go
+
+| file | role |
+| --- | --- |
+| `OptiScaler.dll` | the component itself |
+| `nvngx.dll_dlssnr.dll` | the forwarder |
+| `OptiScaler.ini` | settings, written per install |
+
+Proxy names OptiScaler's own setup offers, in its order of preference:
+`dxgi.dll` (default, most D3D11/12 titles), `winmm.dll` (when the game ships
+its own dxgi), `version.dll`, `dbghelp.dll` (loads very early; some Unreal
+titles need it), `d3d12.dll`, `wininet.dll`, `winhttp.dll`. **This is a
+different set from the loader proxies in `install::placement`** — it includes
+`dxgi.dll` and `d3d12.dll` and excludes `dinput8.dll`.
+
+Builds before 0.9 leave `nvapi64.dll`, `nvngx.dll`, `OptiScaler.asi`,
+`Remove OptiScaler.bat` and `Remove_OptiScaler.bat` behind, and OptiScaler's own
+setup flags them as conflicting. `setup_windows.bat` and `setup_linux.sh` in the
+zip do by hand what an installer does itself and are skipped.
+
+Licensing: OptiScaler is **GPL-3.0**. It is fetched from its own release page at
+run time and never bundled, like every other component here.
+
+### FSR 3.1 frame generation
+
+The package carries `amd_fidelityfx_loader_dx12.dll` and
+`amd_fidelityfx_framegeneration_dx12.dll` under `OptiScaler/`, so three keys
+turn it on with nothing else to download:
+
+```ini
+[FrameGen]
+Enabled=true
+FGInput=upscaler
+FGOutput=fsrfg
+[OptiFG]
+HUDFix=true
+```
+
+`HUDFix` is not optional with the upscaler as input: without it the HUD is
+generated along with the frame and text ghosts.
+
+**This is 2x — one generated frame per rendered frame — and Direct3D 12 only.**
+It works on RTX 20 through 50, two generations below what DLSS frame generation
+needs. The 3x and 4x multipliers are NVIDIA multi-frame generation and are not
+this. Modelled here as `Substitute::FsrFrameGeneration`, which carries its own
+`Generation::Turing` floor precisely because applying the feature's Ada floor
+would refuse it on the cards it exists for.
+
+### A trap worth naming
+
+OptiScaler's own package ships `libxess.dll` and `amd_fidelityfx_*.dll` under
+`OptiScaler/` — its bundled upscalers, not the game's. Counting those as
+evidence would let one install manufacture the justification for the next.
+Autopilot skips the `optiscaler` and `licenses` directories for this reason;
+`ships_upscaler` here reads only the executable's own directory.
+
+And a game that links FSR **statically** ships none of those DLLs and cannot be
+told apart from a game with no upscaler at all. The evidence is one-directional:
+finding a runtime proves an upscaler, finding none proves nothing.
